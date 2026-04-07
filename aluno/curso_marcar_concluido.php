@@ -9,6 +9,7 @@
  * Atualiza progresso_ead = 100 na matrícula, permitindo acesso
  * à avaliação e ao certificado.
  */
+require_once __DIR__ . '/../includes/config.php';
 require_once __DIR__ . '/../includes/conexao.php';
 exigeLogin();
 

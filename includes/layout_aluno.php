@@ -4,7 +4,10 @@
  * Cabeçalho do portal do veterinário — mesmo padrão visual do admin
  * Variáveis esperadas: $pageTitulo, $paginaAtiva
  */
-if (session_status() === PHP_SESSION_NONE) session_start();
+if (session_status() === PHP_SESSION_NONE) {
+    if (defined('SESSION_NAME')) session_name(SESSION_NAME);
+    session_start();
+}
 exigeLogin();
 if ((int)($_SESSION['usr_perfil'] ?? 0) === 1) {
     header('Location: /crmv/admin/dashboard.php'); exit;

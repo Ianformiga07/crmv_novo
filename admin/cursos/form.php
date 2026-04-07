@@ -1,48 +1,59 @@
 <?php
 /**
- * form.php — Cadastro / Edição de Curso
- * /crmv/admin/cursos/form.php
+ * admin/cursos/form.php — Cadastro e Edição de Curso
+ * Organizado em 4 abas: Informações Gerais | Conteúdo EAD | Avaliação | Certificado
  */
-require_once __DIR__ . '/../../includes/conexao.php';
-exigeAdmin();
+require_once __DIR__ . '/../../includes/bootstrap.php';
+Auth::requireAdmin();
+
+$db = Database::getInstance();
 
 $id       = (int)($_GET['id'] ?? 0);
 $editando = $id > 0;
 $c        = [];
 $erros    = [];
+$modulos  = [];
+$avaliacao = null;
+$questoes  = [];
+$materiais = [];
 
-$categorias  = dbQuery("SELECT categoria_id, nome, cor_hex FROM tbl_categorias WHERE ativo=1 ORDER BY ordem");
-$instrutores = dbQuery("SELECT instrutor_id, nome, titulo FROM tbl_instrutores WHERE ativo=1 ORDER BY nome");
-$materiais   = [];
-$modulos     = [];
-$avaliacao   = null;
-$questoes    = [];
+// ── Dados para selects ────────────────────────────────────
+$categorias  = $db->fetchAll("SELECT categoria_id, nome, cor_hex FROM tbl_categorias WHERE ativo=1 ORDER BY ordem");
+$instrutores = $db->fetchAll("SELECT instrutor_id, nome, titulo FROM tbl_instrutores WHERE ativo=1 ORDER BY nome");
 
+// ── Carrega dados do curso ao editar ──────────────────────
 if ($editando) {
-    $c = dbQueryOne("SELECT * FROM tbl_cursos WHERE curso_id = ?", [$id]);
-    if (!$c) { flash('Curso não encontrado.', 'erro'); header('Location: /crmv/admin/cursos/lista.php'); exit; }
+    $c = $db->fetchOne("SELECT * FROM tbl_cursos WHERE curso_id = ?", [$id]);
+    if (!$c) {
+        flash('Curso não encontrado.', 'erro');
+        header('Location: ' . BASE_URL . '/admin/cursos/lista.php');
+        exit;
+    }
 
-    $materiais = dbQuery(
+    // Módulos e aulas (EAD)
+    $rawMods = $db->fetchAll("SELECT * FROM tbl_modulos WHERE curso_id=? ORDER BY ordem", [$id]);
+    foreach ($rawMods as $mod) {
+        $aulas     = $db->fetchAll("SELECT * FROM tbl_aulas WHERE modulo_id=? AND ativo=1 ORDER BY ordem", [$mod['modulo_id']]);
+        $modulos[] = array_merge($mod, ['aulas' => $aulas]);
+    }
+
+    // Materiais do curso (gerais)
+    $materiais = $db->fetchAll(
         "SELECT * FROM tbl_materiais WHERE curso_id=? AND (modulo_id IS NULL OR modulo_id=0) ORDER BY criado_em",
         [$id]
     );
 
-    $rawMods = dbQuery("SELECT * FROM tbl_modulos WHERE curso_id=? ORDER BY ordem", [$id]);
-    foreach ($rawMods as $mod) {
-        $aulas = dbQuery("SELECT * FROM tbl_aulas WHERE modulo_id=? AND ativo=1 ORDER BY ordem", [$mod['modulo_id']]);
-        $modulos[] = array_merge($mod, ['aulas' => $aulas]);
-    }
-
-    $avaliacao = dbQueryOne(
-        "SELECT * FROM tbl_avaliacoes WHERE curso_id=? AND (modulo_id IS NULL OR modulo_id=0) AND ativo=1 ORDER BY avaliacao_id LIMIT 1",
+    // Avaliação
+    $avaliacao = $db->fetchOne(
+        "SELECT * FROM tbl_avaliacoes WHERE curso_id=? AND (modulo_id IS NULL OR modulo_id=0) AND ativo=1 LIMIT 1",
         [$id]
     );
     if ($avaliacao) {
-        $rows = dbQuery(
+        $rows = $db->fetchAll(
             "SELECT q.*, a.alternativa_id, a.texto AS alt_txt, a.correta, a.ordem AS alt_ord
              FROM tbl_questoes q
-             INNER JOIN tbl_alternativas a ON a.questao_id=q.questao_id
-             WHERE q.avaliacao_id=? AND q.ativo=1
+             INNER JOIN tbl_alternativas a ON a.questao_id = q.questao_id
+             WHERE q.avaliacao_id = ? AND q.ativo = 1
              ORDER BY q.ordem, a.ordem",
             [$avaliacao['avaliacao_id']]
         );
@@ -58,12 +69,14 @@ if ($editando) {
     }
 }
 
-/* ════════════════════════════════ POST ════════════════════ */
+// ════════════════════════════════════════════════════════════
+//  PROCESSAMENTO DO POST
+// ════════════════════════════════════════════════════════════
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-
+    Auth::verifyCsrf();
     $acao = $_POST['_acao'] ?? 'salvar_curso';
 
-    /* ─── Salvar dados gerais ─────────────────────────────── */
+    /* ── ABA 1: Salvar dados gerais ─────────────────────── */
     if ($acao === 'salvar_curso') {
 
         $campos = [
@@ -89,11 +102,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'observacoes'    => trim($_POST['observacoes']    ?? ''),
             'requer_avaliacao'   => isset($_POST['requer_avaliacao'])   ? 1 : 0,
             'avaliacao_com_nota' => isset($_POST['avaliacao_com_nota']) ? 1 : 0,
-            'nota_minima'        => (float)str_replace(',','.', $_POST['nota_minima'] ?? '70'),
+            'nota_minima'        => (float)str_replace(',', '.', $_POST['nota_minima'] ?? '70'),
             'tentativas_maximas' => (int)($_POST['tentativas_maximas'] ?? 3),
             'cert_conteudo_programatico' => $_POST['cert_conteudo_programatico'] ?? '',
-            'cert_validade'              => ($v = (int)($_POST['cert_validade'] ?? 0)) > 0 ? $v : null,
-            'cert_obs'                   => trim($_POST['cert_obs'] ?? ''),
+            'cert_validade'  => ($v = (int)($_POST['cert_validade'] ?? 0)) > 0 ? $v : null,
+            'cert_obs'       => trim($_POST['cert_obs'] ?? ''),
         ];
 
         // Normaliza YouTube ID
@@ -103,982 +116,904 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $campos['youtube_id'] = $m[1] ?? substr($yt, 0, 11);
         }
 
-        if ($campos['titulo'] === '')        $erros[] = 'Título é obrigatório.';
-        if ($campos['carga_horaria'] <= 0)   $erros[] = 'Carga horária deve ser maior que zero.';
+        // Validações
+        if ($campos['titulo'] === '')       $erros[] = 'Título é obrigatório.';
+        if ($campos['carga_horaria'] <= 0)  $erros[] = 'Carga horária deve ser maior que zero.';
 
-        // Processa upload da capa
+        // Upload de capa
         $nomeCapa = $c['capa'] ?? null;
         if (!empty($_FILES['capa']['name'])) {
-            $ext = strtolower(pathinfo($_FILES['capa']['name'], PATHINFO_EXTENSION));
-            if (!in_array($ext, ['jpg','jpeg','png','webp'])) {
-                $erros[] = 'Capa deve ser JPG, PNG ou WEBP.';
-            } elseif ($_FILES['capa']['size'] > 5*1024*1024) {
-                $erros[] = 'Capa deve ter no máximo 5MB.';
+            $up = uploadArquivo($_FILES['capa'], 'capas', ['jpg','jpeg','png','webp'], 5);
+            if ($up['ok']) {
+                if ($nomeCapa) removeUpload('capas/' . $nomeCapa);
+                $nomeCapa = $up['nome'];
             } else {
-                $nomeCapa = 'capa_'.time().'_'.bin2hex(random_bytes(4)).'.'.$ext;
-                $destCapa = __DIR__.'/../../uploads/capas/'.$nomeCapa;
-                if (!move_uploaded_file($_FILES['capa']['tmp_name'], $destCapa)) {
-                    $erros[] = 'Falha ao salvar a capa.';
-                    $nomeCapa = $c['capa'] ?? null;
-                } elseif (!empty($c['capa']) && $c['capa'] !== $nomeCapa) {
-                    @unlink(__DIR__.'/../../uploads/capas/'.$c['capa']);
-                }
+                $erros[] = $up['erro'];
             }
         }
+        $campos['capa'] = $nomeCapa;
 
         if (empty($erros)) {
-            $campos['capa'] = $nomeCapa;
-
             if ($editando) {
-                /* ── UPDATE ── */
-                dbExecute(
-                    "UPDATE tbl_cursos SET
-                        categoria_id=?, instrutor_id=?, titulo=?, descricao=?,
-                        tipo=?, modalidade=?, carga_horaria=?, vagas=?,
-                        data_inicio=?, data_fim=?, horario=?,
-                        local_nome=?, local_cidade=?, local_uf=?, local_endereco=?,
-                        link_ead=?, youtube_id=?, valor=?, status=?,
-                        observacoes=?, capa=?,
-                        requer_avaliacao=?, avaliacao_com_nota=?, nota_minima=?, tentativas_maximas=?,
-                        cert_conteudo_programatico=?, cert_validade=?, cert_obs=?,
-                        atualizado_em=NOW()
-                     WHERE curso_id=?",
-                    [
-                        $campos['categoria_id'], $campos['instrutor_id'],
-                        $campos['titulo'],        $campos['descricao'],
-                        $campos['tipo'],          $campos['modalidade'],
-                        $campos['carga_horaria'], $campos['vagas'],
-                        $campos['data_inicio'],   $campos['data_fim'],
-                        $campos['horario'],
-                        $campos['local_nome'],    $campos['local_cidade'],
-                        $campos['local_uf'],      $campos['local_endereco'],
-                        $campos['link_ead'],      $campos['youtube_id'],
-                        $campos['valor'],         $campos['status'],
-                        $campos['observacoes'],   $campos['capa'],
-                        $campos['requer_avaliacao'], $campos['avaliacao_com_nota'],
-                        $campos['nota_minima'],   $campos['tentativas_maximas'],
-                        $campos['cert_conteudo_programatico'],
-                        $campos['cert_validade'], $campos['cert_obs'],
-                        $_SESSION['usr_id']
-                    ]
+                $cols = implode(', ', array_map(fn($k) => "$k=?", array_keys($campos)));
+                $db->execute(
+                    "UPDATE tbl_cursos SET $cols, atualizado_em=NOW() WHERE curso_id=?",
+                    [...array_values($campos), $id]
                 );
-                $salvoId = $id;
-                registraLog($_SESSION['usr_id'], 'EDITAR_CURSO', "Editou curso: {$campos['titulo']}", 'tbl_cursos', $id);
-                flash('Curso atualizado com sucesso!', 'sucesso');
-
+                flash('Curso atualizado com sucesso!');
             } else {
-                /* ── INSERT ── */
-                dbExecute(
-                    "INSERT INTO tbl_cursos
-                        (categoria_id, instrutor_id, titulo, descricao,
-                         tipo, modalidade, carga_horaria, vagas,
-                         data_inicio, data_fim, horario,
-                         local_nome, local_cidade, local_uf, local_endereco,
-                         link_ead, youtube_id, valor, status,
-                         observacoes, capa,
-                         requer_avaliacao, avaliacao_com_nota, nota_minima, tentativas_maximas,
-                         cert_conteudo_programatico, cert_validade, cert_obs,
-                         ativo, criado_por)
-                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)",
-                    [
-                        $campos['categoria_id'], $campos['instrutor_id'],
-                        $campos['titulo'],        $campos['descricao'],
-                        $campos['tipo'],          $campos['modalidade'],
-                        $campos['carga_horaria'], $campos['vagas'],
-                        $campos['data_inicio'],   $campos['data_fim'],
-                        $campos['horario'],
-                        $campos['local_nome'],    $campos['local_cidade'],
-                        $campos['local_uf'],      $campos['local_endereco'],
-                        $campos['link_ead'],      $campos['youtube_id'],
-                        $campos['valor'],         $campos['status'],
-                        $campos['observacoes'],   $campos['capa'],
-                        $campos['requer_avaliacao'], $campos['avaliacao_com_nota'],
-                        $campos['nota_minima'],   $campos['tentativas_maximas'],
-                        $campos['cert_conteudo_programatico'],
-                        $campos['cert_validade'], $campos['cert_obs'],
-                        $_SESSION['usr_id']
-                    ]
+                $campos['criado_por'] = Auth::id();
+                $cols   = implode(', ', array_keys($campos));
+                $placeholders = implode(', ', array_fill(0, count($campos), '?'));
+                $db->execute(
+                    "INSERT INTO tbl_cursos ($cols) VALUES ($placeholders)",
+                    array_values($campos)
                 );
-                $salvoId = dbLastId();
-                $id = $salvoId; $editando = true;
-                registraLog($_SESSION['usr_id'], 'CRIAR_CURSO', "Criou curso: {$campos['titulo']}", 'tbl_cursos', $salvoId);
-                flash('Curso cadastrado! Complete as informações nas abas acima.', 'sucesso');
+                $id       = $db->lastInsertId();
+                $editando = true;
+                flash('Curso criado com sucesso! Agora você pode adicionar conteúdo.');
             }
-
-            // Materiais gerais anexados no mesmo submit
-            if (!empty($_FILES['materiais']['name'][0])) {
-                foreach ($_FILES['materiais']['name'] as $k => $nOrig) {
-                    if (empty($nOrig)) continue;
-                    $ext2 = strtolower(pathinfo($nOrig, PATHINFO_EXTENSION));
-                    if (!in_array($ext2, ['pdf','doc','docx','xls','xlsx','ppt','pptx','zip','mp4'])) continue;
-                    if ($_FILES['materiais']['size'][$k] > 50*1024*1024) continue;
-                    $nArq = 'mat_'.$salvoId.'_'.time().'_'.bin2hex(random_bytes(4)).'.'.$ext2;
-                    if (move_uploaded_file($_FILES['materiais']['tmp_name'][$k], __DIR__.'/../../uploads/materiais/'.$nArq)) {
-                        dbExecute(
-                            "INSERT INTO tbl_materiais (curso_id,modulo_id,nome_arquivo,nome_original,tamanho,tipo_mime,criado_por) VALUES (?,NULL,?,?,?,?,?)",
-                            [$salvoId, $nArq, $nOrig, $_FILES['materiais']['size'][$k], $_FILES['materiais']['type'][$k], $_SESSION['usr_id']]
-                        );
-                    }
-                }
-            }
-
-            $abaRedir = $_POST['_aba_ativa'] ?? 'dados';
-            header("Location: /crmv/admin/cursos/form.php?id={$salvoId}&aba={$abaRedir}");
+            header('Location: ' . BASE_URL . '/admin/cursos/form.php?id=' . $id . '&aba=' . ($_POST['proxima_aba'] ?? '1'));
             exit;
         }
-        $c = array_merge($c, $campos);
     }
 
-/* ─── Salvar aulas ────────────────────────────────────── */
-elseif ($acao === 'salvar_aulas') {
-
-    if (!$id) {
-        flash('Salve o curso antes de cadastrar as aulas.', 'erro');
-        header("Location: /crmv/admin/cursos/form.php");
+    /* ── ABA 2: Salvar módulo/aula EAD ──────────────────── */
+    if ($acao === 'salvar_modulo' && $editando) {
+        $tituloMod = trim($_POST['modulo_titulo'] ?? '');
+        $ordemMod  = (int)($_POST['modulo_ordem'] ?? 1);
+        if ($tituloMod) {
+            $db->execute(
+                "INSERT INTO tbl_modulos (curso_id, titulo, ordem) VALUES (?,?,?)",
+                [$id, $tituloMod, $ordemMod]
+            );
+            flash('Módulo adicionado!');
+        }
+        header('Location: ' . BASE_URL . '/admin/cursos/form.php?id=' . $id . '&aba=2');
         exit;
     }
 
-    $modPadrao = dbQueryOne("SELECT modulo_id FROM tbl_modulos WHERE curso_id=? ORDER BY ordem LIMIT 1", [$id]);
-    $moduloId  = null;
+    if ($acao === 'salvar_aula' && $editando) {
+        $moduloId  = (int)($_POST['modulo_id']    ?? 0);
+        $tituloAula= trim($_POST['aula_titulo']   ?? '');
+        $youtubeId = trim($_POST['aula_youtube']  ?? '');
+        $linkExt   = trim($_POST['aula_link']     ?? '');
+        $duracao   = (int)($_POST['aula_duracao'] ?? 0) ?: null;
+        $ordem     = (int)($_POST['aula_ordem']   ?? 1);
 
-    if ($modPadrao) {
-        $moduloId = $modPadrao['modulo_id'];
-
-        foreach (dbQuery("SELECT * FROM tbl_aulas WHERE modulo_id=?", [$moduloId]) as $aOld) {
-            if (!empty($aOld['arquivo_video'])) {
-                @unlink(__DIR__.'/../../uploads/videos/'.$aOld['arquivo_video']);
+        if ($moduloId && $tituloAula) {
+            // Normaliza YouTube
+            if ($youtubeId && str_contains($youtubeId, 'youtu')) {
+                preg_match('/(?:v=|\/embed\/|\/shorts\/|youtu\.be\/)([a-zA-Z0-9_-]{11})/', $youtubeId, $m);
+                $youtubeId = $m[1] ?? substr($youtubeId, 0, 11);
             }
+            $db->execute(
+                "INSERT INTO tbl_aulas (modulo_id, titulo, youtube_id, link_externo, duracao_min, ordem) VALUES (?,?,?,?,?,?)",
+                [$moduloId, $tituloAula, $youtubeId ?: null, $linkExt ?: null, $duracao, $ordem]
+            );
+            flash('Aula adicionada!');
         }
-
-        dbExecute("DELETE FROM tbl_aulas WHERE modulo_id=?", [$moduloId]);
-
-    } else {
-
-        dbExecute(
-            "INSERT INTO tbl_modulos (curso_id,titulo,ordem) VALUES (?,'Aulas do Curso',1)",
-            [$id]
-        );
-
-        $moduloId = dbLastId();
+        header('Location: ' . BASE_URL . '/admin/cursos/form.php?id=' . $id . '&aba=2');
+        exit;
     }
 
-    $titulos = $_POST['aula_titulo'] ?? [];
-    $yts     = $_POST['aula_yt'] ?? [];
-    $links   = $_POST['aula_link'] ?? [];
-    $durs    = $_POST['aula_duracao'] ?? [];
-
-    foreach ($titulos as $i => $titulo) {
-
-        $titulo = trim($titulo);
-
-        if ($titulo === '') {
-            $titulo = 'Aula '.($i+1);
-        }
-
-        $ytId = '';
-        $linkExt = trim($links[$i] ?? '');
-        $ytRaw = trim($yts[$i] ?? '');
-        $dur   = (int)($durs[$i] ?? 0) ?: null;
-
-        $arqV = null;
-
-        if ($ytRaw) {
-            preg_match('/(?:v=|\/embed\/|\/shorts\/|youtu\.be\/)([a-zA-Z0-9_-]{11})/', $ytRaw, $m);
-            $ytId = $m[1] ?? (strlen($ytRaw) <= 11 ? $ytRaw : '');
-        }
-
-        if (isset($_FILES['aula_video']['error'][$i]) && $_FILES['aula_video']['error'][$i] === UPLOAD_ERR_OK) {
-
-            $tmp  = $_FILES['aula_video']['tmp_name'][$i];
-            $nome = $_FILES['aula_video']['name'][$i];
-
-            $vExt = strtolower(pathinfo($nome, PATHINFO_EXTENSION));
-
-            if (in_array($vExt, ['mp4','mov','avi','mkv','webm'])) {
-
-                $dir = __DIR__ . '/../../uploads/videos/';
-
-                if (!is_dir($dir)) {
-                    mkdir($dir, 0777, true);
-                }
-
-                $vNome = 'video_'.$id.'_'.time().'_'.bin2hex(random_bytes(3)).'.'.$vExt;
-
-                if (move_uploaded_file($tmp, $dir.$vNome)) {
-                    $arqV = $vNome;
-                }
+    if ($acao === 'upload_material' && $editando) {
+        if (!empty($_FILES['material']['name'])) {
+            $up = uploadArquivo($_FILES['material'], 'materiais', ['pdf','doc','docx','ppt','pptx','xls','xlsx','zip'], 20);
+            if ($up['ok']) {
+                $titulo = trim($_POST['material_titulo'] ?? '') ?: $_FILES['material']['name'];
+                $db->execute(
+                    "INSERT INTO tbl_materiais (curso_id, nome_arquivo, nome_original, tamanho, tipo_mime, criado_por)
+                     VALUES (?,?,?,?,?,?)",
+                    [$id, $up['nome'], $_FILES['material']['name'], $_FILES['material']['size'],
+                     $_FILES['material']['type'], Auth::id()]
+                );
+                flash('Material enviado!');
+            } else {
+                flash($up['erro'], 'erro');
             }
         }
-
-        dbExecute(
-            "INSERT INTO tbl_aulas 
-            (modulo_id,titulo,youtube_id,link_externo,arquivo_video,duracao_min,ordem,ativo) 
-            VALUES (?,?,?,?,?,?,?,1)",
-            [$moduloId, $titulo, $ytId ?: null, $linkExt ?: null, $arqV, $dur, $i+1]
-        );
-    }
-
-    flash('Aulas salvas!', 'sucesso');
-    header("Location: /crmv/admin/cursos/form.php?id={$id}&aba=aulas");
-    exit;
-}
-
-    /* ─── Salvar avaliação ────────────────────────────────── */
-    elseif ($acao === 'salvar_avaliacao' && $editando) {
-        $avTit   = trim($_POST['av_titulo'] ?? 'Avaliação Final');
-        $avDesc  = trim($_POST['av_descricao'] ?? '');
-        $avNota  = (float)str_replace(',', '.', $_POST['av_nota_minima'] ?? '70');
-        $avTempo = (int)($_POST['av_tempo_limite'] ?? 0) ?: null;
-        $avTent  = (int)($_POST['av_tentativas_max'] ?? 3);
-        $avRand  = isset($_POST['av_randomizar']) ? 1 : 0;
-
-        $enuns = $_POST['q_enunciado'] ?? [];
-        $ponts = $_POST['q_pontos']    ?? [];
-        $corts = $_POST['q_correta']   ?? [];
-        $alts  = [];
-        for ($a = 0; $a < 4; $a++) $alts[$a] = $_POST["q_alt{$a}"] ?? [];
-
-        $avOld = dbQueryOne("SELECT avaliacao_id FROM tbl_avaliacoes WHERE curso_id=? AND (modulo_id IS NULL OR modulo_id=0)", [$id]);
-        if ($avOld) {
-            foreach (dbQuery("SELECT questao_id FROM tbl_questoes WHERE avaliacao_id=?", [$avOld['avaliacao_id']]) as $qo) {
-                dbExecute("DELETE FROM tbl_alternativas WHERE questao_id=?", [$qo['questao_id']]);
-            }
-            dbExecute("DELETE FROM tbl_questoes  WHERE avaliacao_id=?", [$avOld['avaliacao_id']]);
-            dbExecute("DELETE FROM tbl_avaliacoes WHERE avaliacao_id=?", [$avOld['avaliacao_id']]);
-        }
-
-        dbExecute(
-            "INSERT INTO tbl_avaliacoes (curso_id,modulo_id,titulo,descricao,tipo,nota_minima,tempo_limite,tentativas_max,randomizar,ativo)
-             VALUES (?,NULL,?,?,'PROVA',?,?,?,?,1)",
-            [$id, $avTit, $avDesc, $avNota, $avTempo, $avTent, $avRand]
-        );
-        $avId = dbLastId();
-
-        foreach ($enuns as $qi => $enun) {
-            $enun = trim($enun); if ($enun === '') continue;
-            $pts  = max(0.5, (float)str_replace(',', '.', $ponts[$qi] ?? '1'));
-            $cort = (int)($corts[$qi] ?? 0);
-            dbExecute("INSERT INTO tbl_questoes (avaliacao_id,enunciado,tipo,pontos,ordem,ativo) VALUES (?,?,'MULTIPLA',?,?,1)", [$avId, $enun, $pts, $qi+1]);
-            $qId = dbLastId();
-            for ($a = 0; $a < 4; $a++) {
-                $txt = trim($alts[$a][$qi] ?? '');
-                if ($txt === '') continue;
-                dbExecute("INSERT INTO tbl_alternativas (questao_id,texto,correta,ordem) VALUES (?,?,?,?)", [$qId, $txt, ($a === $cort ? 1 : 0), $a+1]);
-            }
-        }
-
-        dbExecute("UPDATE tbl_cursos SET requer_avaliacao=1,avaliacao_com_nota=1,nota_minima=?,tentativas_maximas=? WHERE curso_id=?", [$avNota, $avTent, $id]);
-        registraLog($_SESSION['usr_id'], 'EDITAR_AVALIACAO', "Salvou avaliação curso {$id}", 'tbl_cursos', $id);
-        flash('Avaliação salva!', 'sucesso');
-        header("Location: /crmv/admin/cursos/form.php?id={$id}&aba=avaliacao"); exit;
-    }
-
-    /* ─── Apagar avaliação ────────────────────────────────── */
-    elseif ($acao === 'apagar_avaliacao' && $editando) {
-        $avOld = dbQueryOne("SELECT avaliacao_id FROM tbl_avaliacoes WHERE curso_id=? AND (modulo_id IS NULL OR modulo_id=0)", [$id]);
-        if ($avOld) {
-            foreach (dbQuery("SELECT questao_id FROM tbl_questoes WHERE avaliacao_id=?", [$avOld['avaliacao_id']]) as $qo) {
-                dbExecute("DELETE FROM tbl_alternativas WHERE questao_id=?", [$qo['questao_id']]);
-            }
-            dbExecute("DELETE FROM tbl_questoes  WHERE avaliacao_id=?", [$avOld['avaliacao_id']]);
-            dbExecute("DELETE FROM tbl_avaliacoes WHERE avaliacao_id=?", [$avOld['avaliacao_id']]);
-            dbExecute("UPDATE tbl_cursos SET requer_avaliacao=0 WHERE curso_id=?", [$id]);
-        }
-        flash('Avaliação removida.', 'aviso');
-        header("Location: /crmv/admin/cursos/form.php?id={$id}&aba=avaliacao"); exit;
+        header('Location: ' . BASE_URL . '/admin/cursos/form.php?id=' . $id . '&aba=2');
+        exit;
     }
 }
 
-/* ── Helpers ── */
-$ufs   = ['AC','AL','AM','AP','BA','CE','DF','ES','GO','MA','MG','MS','MT','PA','PB','PE','PI','PR','RJ','RN','RO','RR','RS','SC','SE','SP','TO'];
-$tipos = ['CURSO','PALESTRA','WORKSHOP','CONGRESSO','WEBINAR'];
-$abaAtiva = $_GET['aba'] ?? 'dados';
-
-/* ── Helper renderizar questão ── */
-function renderQuestaoHTML(int $qi, array $q): string {
-    $alts = $q['alts'];
-    while (count($alts) < 4) $alts[] = ['texto'=>'','correta'=>false];
-    $letras  = ['A','B','C','D'];
-    $corrIdx = $q['correta'] ?? 0;
-    $h  = '<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--azul-esc);color:#fff">';
-    $h .= '<span class="q-num" style="width:22px;height:22px;border-radius:50%;background:var(--ouro);color:var(--azul-esc);font-weight:800;font-size:.75rem;display:flex;align-items:center;justify-content:center;flex-shrink:0">'.($qi+1).'</span>';
-    $h .= '<span style="font-size:.75rem;color:rgba(255,255,255,.7)">Questão '.($qi+1).'</span>';
-    $h .= '<div style="display:flex;align-items:center;gap:6px;margin-left:auto">';
-    $h .= '<span style="font-size:.72rem;opacity:.7">Pontos:</span>';
-    $h .= '<input type="number" name="q_pontos[]" min="0.5" max="100" step="0.5" value="'.htmlspecialchars($q['pontos']??1).'" style="width:55px;background:transparent;border:1px solid rgba(255,255,255,.4);border-radius:4px;color:#fff;font-size:.78rem;padding:2px 6px;text-align:center">';
-    $h .= '<button type="button" onclick="removerQuestao(this)" style="background:transparent;border:none;color:rgba(255,255,255,.6);cursor:pointer;padding:4px;border-radius:4px"><i class="fa-solid fa-xmark"></i></button>';
-    $h .= '</div></div>';
-    $h .= '<div style="padding:12px 14px;background:var(--c50);border-bottom:1px solid var(--c200)">';
-    $h .= '<textarea name="q_enunciado[]" rows="2" placeholder="Enunciado da questão..." required style="width:100%;padding:8px;border:1px solid var(--c300);border-radius:6px;font-size:.88rem;resize:vertical">'.htmlspecialchars($q['enunciado']??'').'</textarea></div>';
-    $h .= '<div style="padding:12px 14px;display:flex;flex-direction:column;gap:6px">';
-    $h .= '<div style="font-size:.72rem;color:var(--c400);margin-bottom:2px"><i class="fa-solid fa-circle-check" style="color:var(--verde)"></i> Marque a alternativa correta</div>';
-    for ($a = 0; $a < 4; $a++) {
-        $isC = ($a === $corrIdx);
-        $h .= '<label style="display:flex;align-items:center;gap:8px;flex:1;padding:7px 10px;border-radius:6px;cursor:pointer;border:1.5px solid '.($isC?'var(--verde)':'var(--c200)').';background:'.($isC?'#f0fdf4':'#fff').'">';
-        $h .= '<input type="radio" name="q_correta['.$qi.']" value="'.$a.'" '.($isC?'checked':'').' onchange="destacarCorreta(this)" style="accent-color:var(--verde)">';
-        $h .= '<span style="width:18px;height:18px;border-radius:50%;background:var(--azul-esc);color:var(--ouro);font-weight:700;font-size:.7rem;display:flex;align-items:center;justify-content:center;flex-shrink:0">'.$letras[$a].'</span>';
-        $h .= '<input type="text" name="q_alt'.$a.'[]" value="'.htmlspecialchars($alts[$a]['texto']??'').'" placeholder="Alternativa '.$letras[$a].'" style="flex:1;border:none;outline:none;background:transparent;font-size:.85rem;color:var(--c700)">';
-        $h .= '</label>';
-    }
-    $h .= '</div>';
-    return $h;
-}
-
-/* ── Helper campos ocultos do curso para forms secundários ── */
-function camposOcultosCurso(array $c): string {
-    $campos = [
-        'titulo'         => $c['titulo']         ?? '',
-        'carga_horaria'  => $c['carga_horaria']  ?? '0',
-        'status'         => $c['status']         ?? 'RASCUNHO',
-        'tipo'           => $c['tipo']           ?? 'CURSO',
-        'modalidade'     => $c['modalidade']     ?? 'PRESENCIAL',
-        'categoria_id'   => $c['categoria_id']   ?? '',
-        'instrutor_id'   => $c['instrutor_id']   ?? '',
-        'descricao'      => $c['descricao']      ?? '',
-        'observacoes'    => $c['observacoes']    ?? '',
-        'vagas'          => $c['vagas']          ?? '',
-        'valor'          => $c['valor']          ?? '0',
-        'horario'        => $c['horario']        ?? '',
-        'data_inicio'    => $c['data_inicio']    ?? '',
-        'data_fim'       => $c['data_fim']       ?? '',
-        'local_nome'     => $c['local_nome']     ?? '',
-        'local_cidade'   => $c['local_cidade']   ?? '',
-        'local_uf'       => $c['local_uf']       ?? 'TO',
-        'local_endereco' => $c['local_endereco'] ?? '',
-        'link_ead'       => $c['link_ead']       ?? '',
-        'youtube_id'     => $c['youtube_id']     ?? '',
-        'nota_minima'    => $c['nota_minima']    ?? '70',
-        'tentativas_maximas' => $c['tentativas_maximas'] ?? '3',
-        'cert_validade'  => $c['cert_validade']  ?? '0',
-        'cert_obs'       => $c['cert_obs']       ?? '',
-        'cert_conteudo_programatico' => $c['cert_conteudo_programatico'] ?? '',
-    ];
-    $html = '';
-    foreach ($campos as $name => $val) {
-        $html .= '<input type="hidden" name="'.htmlspecialchars($name).'" value="'.htmlspecialchars($val).'">'."\n";
-    }
-    return $html;
-}
+// Aba ativa
+$abaAtiva = (int)($_GET['aba'] ?? 1);
+if (!$editando) $abaAtiva = 1; // Só mostra aba 1 em modo criação
 
 $pageTitulo  = $editando ? 'Editar Curso' : 'Novo Curso';
 $paginaAtiva = 'cursos';
-require_once __DIR__ . '/../../includes/layout.php';
+$breadcrumb  = ['Cursos' => BASE_URL . '/admin/cursos/lista.php', ($editando ? 'Editar' : 'Novo') => null];
+require_once __DIR__ . '/../../includes/layout_admin_header.php';
 ?>
 
-<div class="pg-header">
-    <div class="pg-header-row">
-        <div>
-            <h1 class="pg-titulo"><?= $editando ? 'Editar Curso' : 'Novo Curso / Palestra' ?></h1>
-            <p class="pg-subtitulo"><?= $editando ? 'Atualize as informações do curso' : 'Preencha os dados do novo curso' ?></p>
-        </div>
-        <div class="pg-acoes">
-            <a href="/crmv/admin/cursos/lista.php" class="btn btn-ghost"><i class="fa-solid fa-arrow-left"></i> Voltar</a>
-        </div>
+<!-- ══ Page Header ══════════════════════════════════════════ -->
+<div class="page-header">
+    <div class="page-header-info">
+        <h1 class="page-title"><?= $editando ? 'Editar Curso' : 'Novo Curso' ?></h1>
+        <?php if ($editando): ?>
+        <p class="page-subtitle"><?= e(trunca($c['titulo'], 60)) ?></p>
+        <?php endif; ?>
     </div>
-</div>
-
-<?php if (!empty($erros)): ?>
-<div class="alerta alerta-erro" style="margin-bottom:20px">
-    <i class="fa-solid fa-circle-xmark"></i>
-    <div><strong>Corrija os erros:</strong><ul style="margin:6px 0 0 16px;padding:0">
-        <?php foreach ($erros as $e): ?><li><?= htmlspecialchars($e) ?></li><?php endforeach; ?>
-    </ul></div>
-</div>
-<?php endif; ?>
-
-<!-- Aviso certificado automático -->
-<div class="alerta alerta-info" style="margin-bottom:16px">
-    <i class="fa-solid fa-certificate" style="color:var(--ouro)"></i>
-    <div>
-        <strong>Certificado automático ativado</strong> — O aluno emite o próprio certificado assim que concluir todas as aulas<?= ($c['requer_avaliacao'] ?? 0) ? ' <strong>e for aprovado na avaliação</strong>' : '' ?>.
-    </div>
-</div>
-
-<!-- ── Abas ── -->
-<div class="card" style="margin-bottom:20px">
-    <div class="card-body" style="padding:0 20px">
-        <div class="tabs-barra" style="border-bottom:none;margin:0">
-        <?php
-        $totalAulasRes = 0; foreach ($modulos as $m_) $totalAulasRes += count($m_['aulas']);
-        $abaDefs = [
-            'dados'       => ['fa-graduation-cap',    'Dados',       ''],
-            'aulas'       => ['fa-play-circle',        'Aulas',       $totalAulasRes>0 ? '<span style="font-size:.7rem;padding:1px 6px;border-radius:8px;background:var(--c200);color:var(--c600);margin-left:4px">'.$totalAulasRes.'</span>' : ''],
-            'materiais'   => ['fa-paperclip',          'Materiais',   count($materiais)>0 ? '<span style="font-size:.7rem;padding:1px 6px;border-radius:8px;background:var(--c200);color:var(--c600);margin-left:4px">'.count($materiais).'</span>' : ''],
-            'avaliacao'   => ['fa-clipboard-question', 'Avaliação',   $avaliacao ? '<i class="fa-solid fa-check" style="color:var(--verde);font-size:.7rem;margin-left:4px"></i>' : ''],
-            'certificado' => ['fa-certificate',        'Certificado', ''],
-        ];
-        foreach ($abaDefs as $k => [$ic,$lbl,$extra]):
-        ?>
-        <button type="button" onclick="trocarAba('<?= $k ?>')"
-           class="tab-btn <?= $abaAtiva===$k?'ativo':'' ?>" id="tab-<?= $k ?>"
-           style="background:none;border:none;cursor:pointer;font-family:inherit">
-            <i class="fa-solid <?= $ic ?>" <?= $k==='certificado'?'style="color:var(--ouro)"':'' ?>></i>
-            <?= $lbl ?><?= $extra ?>
-        </button>
-        <?php endforeach; ?>
-        </div>
-    </div>
-</div>
-
-<div style="display:grid;grid-template-columns:1fr 300px;gap:20px;align-items:start">
-
-<!-- ══ COLUNA PRINCIPAL ══ -->
-<div style="display:flex;flex-direction:column;gap:20px">
-
-<!-- ══════════════ ABA DADOS ══════════════ -->
-<div id="aba-dados" class="aba-conteudo" style="display:<?= $abaAtiva==='dados'?'flex':'none' ?>;flex-direction:column;gap:20px">
-<form method="POST" enctype="multipart/form-data" id="fFormDados">
-<input type="hidden" name="_acao"       value="salvar_curso">
-<input type="hidden" name="_aba_ativa"  id="inp_aba_ativa" value="<?= htmlspecialchars($abaAtiva) ?>">
-<input type="hidden" name="status"      id="inp_status_dados" value="<?= htmlspecialchars($c['status']??'RASCUNHO') ?>">
-<input type="file"   name="capa"        id="inpCapaDados" accept="image/jpeg,image/png,image/webp" style="display:none" onchange="prevCapaFn(this)">
-
-<!-- Identificação -->
-<div class="card"><div class="card-header"><span class="card-titulo"><i class="fa-solid fa-graduation-cap"></i> Identificação</span></div>
-<div class="card-body"><div class="form-grid">
-<div class="c12 form-group">
-    <label class="req">Título do Curso / Palestra</label>
-    <input type="text" name="titulo" required data-max="200" value="<?= htmlspecialchars($c['titulo']??'') ?>" placeholder="Ex: Workshop de Ultrassonografia">
-</div>
-<div class="c4 form-group"><label>Tipo</label><select name="tipo">
-    <?php foreach ($tipos as $t): ?><option value="<?= $t ?>" <?= ($c['tipo']??'CURSO')===$t?'selected':'' ?>><?= $t ?></option><?php endforeach; ?>
-</select></div>
-<div class="c4 form-group"><label>Modalidade</label><select name="modalidade" onchange="toggleLocal(this.value)">
-    <option value="PRESENCIAL" <?= ($c['modalidade']??'')==='PRESENCIAL'?'selected':'' ?>>Presencial</option>
-    <option value="EAD"        <?= ($c['modalidade']??'')==='EAD'?'selected':'' ?>>EAD (Online)</option>
-    <option value="HIBRIDO"    <?= ($c['modalidade']??'')==='HIBRIDO'?'selected':'' ?>>Híbrido</option>
-</select></div>
-<div class="c4 form-group"><label>Categoria</label><select name="categoria_id">
-    <option value="">Sem categoria</option>
-    <?php foreach ($categorias as $cat): ?>
-    <option value="<?= $cat['categoria_id'] ?>" <?= ($c['categoria_id']??'')==$cat['categoria_id']?'selected':'' ?>><?= htmlspecialchars($cat['nome']) ?></option>
-    <?php endforeach; ?>
-</select></div>
-<div class="c12 form-group"><label>Descrição</label>
-    <textarea name="descricao" rows="4" data-max="2000" placeholder="Descreva o conteúdo, objetivos e público-alvo..."><?= htmlspecialchars($c['descricao']??'') ?></textarea></div>
-<div class="c12 form-group"><label>Observações</label>
-    <textarea name="observacoes" rows="2" placeholder="Pré-requisitos, avisos importantes..."><?= htmlspecialchars($c['observacoes']??'') ?></textarea></div>
-</div></div></div>
-
-<!-- Datas, Carga e Vagas -->
-<div class="card"><div class="card-header"><span class="card-titulo"><i class="fa-solid fa-calendar-days"></i> Datas, Carga e Vagas</span></div>
-<div class="card-body"><div class="form-grid">
-<div class="c3 form-group"><label class="req">Carga Horária (h)</label>
-    <input type="number" name="carga_horaria" step="0.5" min="0.5" required value="<?= htmlspecialchars($c['carga_horaria']??'') ?>" placeholder="Ex: 8"></div>
-<div class="c3 form-group"><label>Vagas</label>
-    <input type="number" name="vagas" min="1" value="<?= htmlspecialchars($c['vagas']??'') ?>" placeholder="Ilimitado se vazio"></div>
-<div class="c3 form-group"><label>Valor (R$)</label>
-    <input type="number" name="valor" step="0.01" min="0" value="<?= htmlspecialchars($c['valor']??'0') ?>" placeholder="0 para gratuito"></div>
-<div class="c3 form-group"><label>Horário</label>
-    <input type="text" name="horario" value="<?= htmlspecialchars($c['horario']??'') ?>" placeholder="Ex: 08h às 17h"></div>
-<div class="c4 form-group"><label>Início</label>
-    <input type="date" name="data_inicio" value="<?= htmlspecialchars($c['data_inicio']??'') ?>"></div>
-<div class="c4 form-group"><label>Término</label>
-    <input type="date" name="data_fim" value="<?= htmlspecialchars($c['data_fim']??'') ?>"></div>
-<div class="c4 form-group"><label>Instrutor</label><select name="instrutor_id">
-    <option value="">Não definido</option>
-    <?php foreach ($instrutores as $ins): ?>
-    <option value="<?= $ins['instrutor_id'] ?>" <?= ($c['instrutor_id']??'')==$ins['instrutor_id']?'selected':'' ?>><?= htmlspecialchars($ins['nome']) ?><?= $ins['titulo']?' — '.$ins['titulo']:'' ?></option>
-    <?php endforeach; ?>
-</select></div>
-<div class="c12 form-group"><label>Link Plataforma EAD (opcional)</label>
-    <input type="url" name="link_ead" value="<?= htmlspecialchars($c['link_ead']??'') ?>" placeholder="https://... (se usar plataforma externa)">
-    <span class="dica">Use quando o curso redireciona para Moodle ou similar.</span></div>
-</div></div></div>
-
-<!-- Local (oculto para EAD) -->
-<div class="card" id="secaoLocal" style="<?= ($c['modalidade']??'PRESENCIAL')==='EAD'?'display:none':'' ?>">
-    <div class="card-header"><span class="card-titulo"><i class="fa-solid fa-location-dot"></i> Local de Realização</span></div>
-    <div class="card-body"><div class="form-grid">
-        <div class="c6 form-group"><label>Nome do Local</label><input type="text" name="local_nome" value="<?= htmlspecialchars($c['local_nome']??'') ?>" placeholder="Ex: Centro de Eventos CRMV/TO"></div>
-        <div class="c4 form-group"><label>Cidade</label><input type="text" name="local_cidade" value="<?= htmlspecialchars($c['local_cidade']??'') ?>" placeholder="Palmas"></div>
-        <div class="c2 form-group"><label>UF</label><select name="local_uf">
-            <?php foreach ($ufs as $uf): ?><option value="<?= $uf ?>" <?= ($c['local_uf']??'TO')===$uf?'selected':'' ?>><?= $uf ?></option><?php endforeach; ?>
-        </select></div>
-        <div class="c12 form-group"><label>Endereço</label><input type="text" name="local_endereco" value="<?= htmlspecialchars($c['local_endereco']??'') ?>" placeholder="Rua, número, bairro"></div>
-    </div></div>
-</div>
-
-<div style="display:flex;gap:8px">
-    <button type="submit" class="btn btn-primario"><i class="fa-solid fa-floppy-disk"></i> <?= $editando?'Salvar Alterações':'Cadastrar Curso' ?></button>
-    <a href="/crmv/admin/cursos/lista.php" class="btn btn-ghost"><i class="fa-solid fa-xmark"></i> Cancelar</a>
-</div>
-</form>
-</div><!-- /aba-dados -->
-
-<!-- ══════════════ ABA AULAS ══════════════ -->
-<div id="aba-aulas" class="aba-conteudo" style="display:<?= $abaAtiva==='aulas'?'flex':'none' ?>;flex-direction:column;gap:20px">
-<?php if (!$editando): ?>
-<div class="alerta alerta-aviso"><i class="fa-solid fa-triangle-exclamation"></i> Salve os dados do curso primeiro para adicionar aulas.</div>
-<?php else: ?>
-<form method="POST" enctype="multipart/form-data" id="fFormAulas">
-<input type="hidden" name="_acao" value="salvar_aulas">
-<div class="card">
-    <div class="card-header">
-        <span class="card-titulo"><i class="fa-solid fa-play-circle" style="color:var(--azul-clr)"></i> Aulas do Curso</span>
-        <span style="font-size:.75rem;color:var(--c400)">YouTube · Link externo · Upload local</span>
-    </div>
-    <div class="card-body" style="padding:14px">
-        <div id="lista-aulas" style="display:flex;flex-direction:column;gap:10px;margin-bottom:14px">
-        <?php
-        $aulasFlat = [];
-        foreach ($modulos as $m_) foreach ($m_['aulas'] as $a_) $aulasFlat[] = $a_;
-        if (empty($aulasFlat)) $aulasFlat[] = [];
-        foreach ($aulasFlat as $ai => $aula):
-            $tipoAtivo = 'yt';
-            if (!empty($aula['arquivo_video'])) $tipoAtivo = 'upload';
-            elseif (!empty($aula['link_externo'])) $tipoAtivo = 'link';
-        ?>
-        <div class="aula-bloco" data-idx="<?= $ai ?>" style="border:1.5px solid var(--c200);border-radius:var(--radius-lg);overflow:hidden">
-            <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--azul-esc);color:#fff">
-                <span class="aula-num" style="width:22px;height:22px;border-radius:50%;background:var(--ouro);color:var(--azul-esc);font-weight:800;font-size:.75rem;display:flex;align-items:center;justify-content:center;flex-shrink:0"><?= $ai+1 ?></span>
-                <input type="text" name="aula_titulo[]" value="<?= htmlspecialchars($aula['titulo']??'') ?>" placeholder="Título da aula" style="flex:1;background:transparent;border:none;border-bottom:1px solid rgba(255,255,255,.3);color:#fff;font-weight:600;font-size:.9rem;outline:none;padding:2px 0">
-                <input type="number" name="aula_duracao[]" min="1" max="600" value="<?= htmlspecialchars($aula['duracao_min']??'') ?>" placeholder="min" title="Duração em minutos" style="width:62px;background:transparent;border:1px solid rgba(255,255,255,.3);border-radius:5px;color:#fff;font-size:.78rem;padding:3px 6px;text-align:center">
-                <button type="button" onclick="removerAula(this)" style="background:transparent;border:none;color:rgba(255,255,255,.6);cursor:pointer;font-size:.9rem;padding:4px;border-radius:4px"><i class="fa-solid fa-xmark"></i></button>
-            </div>
-            <div style="display:flex;border-bottom:1px solid var(--c200)">
-                <button type="button" class="tipo-btn <?= $tipoAtivo==='yt'?'tipo-ativo':'' ?>" onclick="mudarTipoAula(this,'yt')" style="flex:1;padding:8px;border:none;cursor:pointer;font-size:.78rem;background:<?= $tipoAtivo==='yt'?'var(--azul-esc)':'var(--c50)' ?>;color:<?= $tipoAtivo==='yt'?'#fff':'var(--c600)' ?>;border-right:1px solid var(--c200)"><i class="fa-brands fa-youtube" style="color:<?= $tipoAtivo==='yt'?'#ff6b6b':'#ff0000' ?>"></i> YouTube</button>
-                <button type="button" class="tipo-btn <?= $tipoAtivo==='link'?'tipo-ativo':'' ?>" onclick="mudarTipoAula(this,'link')" style="flex:1;padding:8px;border:none;cursor:pointer;font-size:.78rem;background:<?= $tipoAtivo==='link'?'var(--azul-esc)':'var(--c50)' ?>;color:<?= $tipoAtivo==='link'?'#fff':'var(--c600)' ?>;border-right:1px solid var(--c200)"><i class="fa-solid fa-link"></i> Link Externo</button>
-                <button type="button" class="tipo-btn <?= $tipoAtivo==='upload'?'tipo-ativo':'' ?>" onclick="mudarTipoAula(this,'upload')" style="flex:1;padding:8px;border:none;cursor:pointer;font-size:.78rem;background:<?= $tipoAtivo==='upload'?'var(--azul-esc)':'var(--c50)' ?>;color:<?= $tipoAtivo==='upload'?'#fff':'var(--c600)' ?>"><i class="fa-solid fa-cloud-arrow-up"></i> Upload Local</button>
-            </div>
-            <div class="tipo-painel tipo-yt" style="display:<?= $tipoAtivo==='yt'?'block':'none' ?>;padding:12px 14px">
-                <input type="text" name="aula_yt[]" value="<?= htmlspecialchars($aula['youtube_id']??'') ?>" placeholder="URL ou ID do YouTube" style="width:100%;padding:8px 10px;border:1px solid var(--c300);border-radius:6px;font-size:.85rem" oninput="prevAulaYT(this)">
-                <div class="yt-prev-wrap" style="<?= empty($aula['youtube_id'])?'display:none':'' ?>;margin-top:8px">
-                    <?php if (!empty($aula['youtube_id'])): ?><iframe width="100%" height="180" src="https://www.youtube.com/embed/<?= htmlspecialchars($aula['youtube_id']) ?>" frameborder="0" allowfullscreen style="border-radius:6px;max-width:320px"></iframe><?php endif; ?>
-                </div>
-            </div>
-            <div class="tipo-painel tipo-link" style="display:<?= $tipoAtivo==='link'?'block':'none' ?>;padding:12px 14px">
-                <input type="url" name="aula_link[]" value="<?= htmlspecialchars($aula['link_externo']??'') ?>" placeholder="https://..." style="width:100%;padding:8px 10px;border:1px solid var(--c300);border-radius:6px;font-size:.85rem">
-            </div>
-            <div class="tipo-painel tipo-upload" style="display:<?= $tipoAtivo==='upload'?'block':'none' ?>;padding:12px 14px">
-                <?php if (!empty($aula['arquivo_video'])): ?>
-                <div style="display:flex;align-items:center;gap:10px;padding:8px;background:var(--c50);border-radius:6px;border:1px solid var(--c200);margin-bottom:8px">
-                    <i class="fa-solid fa-film" style="color:var(--azul-clr)"></i>
-                    <span style="font-size:.82rem;flex:1"><?= htmlspecialchars($aula['arquivo_video']) ?></span>
-                    <span style="font-size:.7rem;color:var(--verde)"><i class="fa-solid fa-check"></i> Já enviado</span>
-                </div>
-                <?php endif; ?>
-                <div style="border:2px dashed var(--c300);border-radius:6px;padding:14px;text-align:center;cursor:pointer" onclick="this.querySelector('input').click()">
-                    <i class="fa-solid fa-cloud-arrow-up" style="font-size:1.4rem;color:var(--c400);margin-bottom:6px"></i>
-                    <p style="font-size:.8rem;color:var(--c500);margin:0"><?= !empty($aula['arquivo_video'])?'Substituir vídeo':'Clique para selecionar vídeo' ?></p>
-                    <input type="file" name="aula_video[]" accept=".mp4,.mov,.avi,.mkv,.webm" style="display:none" onchange="nomeVideoSelecionado(this)">
-                </div>
-                <div class="nome-video" style="font-size:.78rem;color:var(--verde);margin-top:4px"></div>
-            </div>
-        </div>
-        <?php endforeach; ?>
-        </div>
-        <button type="button" onclick="adicionarAula()" class="btn btn-ghost" style="width:100%;justify-content:center;border-style:dashed">
-            <i class="fa-solid fa-plus" style="color:var(--azul-clr)"></i> Adicionar Aula
-        </button>
-    </div>
-</div>
-<div style="display:flex;gap:10px;align-items:center">
-    <button type="submit" class="btn btn-primario"><i class="fa-solid fa-floppy-disk"></i> Salvar Todas as Aulas</button>
-    <span style="font-size:.78rem;color:var(--c400)"><i class="fa-solid fa-triangle-exclamation" style="color:var(--ouro)"></i> Ao salvar, a lista de aulas é substituída.</span>
-</div>
-</form>
-<?php endif; ?>
-</div><!-- /aba-aulas -->
-
-<!-- ══════════════ ABA MATERIAIS ══════════════ -->
-<div id="aba-materiais" class="aba-conteudo" style="display:<?= $abaAtiva==='materiais'?'flex':'none' ?>;flex-direction:column;gap:20px">
-<form method="POST" enctype="multipart/form-data" id="fFormMat">
-<input type="hidden" name="_acao"      value="salvar_curso">
-<input type="hidden" name="_aba_ativa" value="materiais">
-<?= camposOcultosCurso($c) ?>
-
-<div class="card"><div class="card-header">
-    <span class="card-titulo"><i class="fa-solid fa-paperclip"></i> Materiais de Apoio</span>
-    <?php if (!empty($materiais)): ?><span style="font-size:.78rem;color:var(--c400)"><?= count($materiais) ?> arquivo<?= count($materiais)!=1?'s':'' ?></span><?php endif; ?>
-</div><div class="card-body" style="display:flex;flex-direction:column;gap:14px">
-    <?php if (!empty($materiais)): ?>
-    <div style="display:flex;flex-direction:column;gap:6px">
-    <?php foreach ($materiais as $mat_): ?>
-    <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--c50);border-radius:7px;border:1px solid var(--c200)">
-        <i class="fa-solid fa-file" style="color:var(--azul-clr);flex-shrink:0"></i>
-        <span style="flex:1;font-size:.85rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><?= htmlspecialchars($mat_['nome_original']) ?></span>
-        <span style="font-size:.72rem;color:var(--c400)"><?= round($mat_['tamanho']/1024) ?> KB</span>
-        <a href="/crmv/admin/cursos/del_material.php?id=<?= $mat_['material_id'] ?>&curso_id=<?= $id ?>" class="btn btn-ghost btn-icone btn-sm" title="Remover" data-confirma="Remover este material?">
-            <i class="fa-solid fa-trash" style="color:var(--verm)"></i>
+    <div class="page-actions">
+        <a href="<?= BASE_URL ?>/admin/cursos/lista.php" class="btn btn-ghost btn-sm">
+            <i class="fa-solid fa-arrow-left"></i> Voltar
         </a>
+        <?php if ($editando): ?>
+        <a href="<?= BASE_URL ?>/admin/matriculas/lista.php?curso_id=<?= $id ?>"
+           class="btn btn-ghost btn-sm">
+            <i class="fa-solid fa-users"></i> Matrículas
+        </a>
+        <?php endif; ?>
     </div>
-    <?php endforeach; ?>
-    </div>
-    <?php endif; ?>
-    <div style="border:2px dashed var(--c300);border-radius:8px;padding:20px;text-align:center;cursor:pointer" onclick="document.getElementById('inpMat').click()">
-        <i class="fa-solid fa-cloud-arrow-up" style="font-size:1.8rem;color:var(--c300);margin-bottom:8px"></i>
-        <p style="font-size:.85rem;color:var(--c500);margin:0">Clique ou arraste arquivos aqui</p>
-        <p style="font-size:.72rem;color:var(--c400);margin:4px 0 0">PDF, DOC, XLS, PPT, ZIP, MP4 — máx. 50MB</p>
-        <input type="file" id="inpMat" name="materiais[]" multiple accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip,.mp4" style="display:none" onchange="listarArquivos(this)">
-    </div>
-    <div id="listaArqs" style="display:none;font-size:.82rem;color:var(--c600)"></div>
+</div>
+
+<?php if ($erros): ?>
+<div class="alert-erros">
+    <strong><i class="fa-solid fa-circle-xmark"></i> Corrija os erros abaixo:</strong>
+    <ul><?php foreach ($erros as $e_msg): ?><li><?= e($e_msg) ?></li><?php endforeach; ?></ul>
+</div>
+<?php endif; ?>
+
+<!-- ══ Abas de navegação ═════════════════════════════════════ -->
+<div class="tabs-bar">
+    <button class="tab-btn <?= $abaAtiva===1?'ativo':'' ?>" onclick="irAba(1)">
+        <i class="fa-solid fa-circle-info"></i> Informações Gerais
+    </button>
     <?php if ($editando): ?>
-    <button type="submit" class="btn btn-primario"><i class="fa-solid fa-cloud-arrow-up"></i> Enviar Materiais</button>
-    <?php endif; ?>
-</div></div>
-</form>
-</div><!-- /aba-materiais -->
-
-<!-- ══════════════ ABA AVALIAÇÃO ══════════════ -->
-<div id="aba-avaliacao" class="aba-conteudo" style="display:<?= $abaAtiva==='avaliacao'?'flex':'none' ?>;flex-direction:column;gap:20px">
-<?php if (!$editando): ?>
-<div class="alerta alerta-aviso"><i class="fa-solid fa-triangle-exclamation"></i> Salve os dados do curso primeiro para criar a avaliação.</div>
-<?php else: ?>
-<?php if ($avaliacao): ?>
-<div class="alerta alerta-info" style="align-items:center">
-    <i class="fa-solid fa-clipboard-check" style="color:var(--verde);font-size:1.2rem"></i>
-    <div style="flex:1">
-        <strong><?= htmlspecialchars($avaliacao['titulo']) ?></strong>
-        <span style="margin-left:8px;color:var(--c500);font-size:.82rem"><?= count($questoes) ?> questões · Nota mín: <?= $avaliacao['nota_minima'] ?> · Tentativas: <?= $avaliacao['tentativas_max'] ?></span>
-    </div>
-    <form method="POST" style="margin:0">
-        <input type="hidden" name="_acao" value="apagar_avaliacao">
-        <button type="submit" class="btn btn-ghost btn-sm" data-confirma="Apagar toda a avaliação e recriar?">
-            <i class="fa-solid fa-trash" style="color:var(--verm)"></i> Apagar e recriar
-        </button>
-    </form>
-</div>
-<?php endif; ?>
-
-<form method="POST" id="fFormAvaliacao">
-<input type="hidden" name="_acao" value="salvar_avaliacao">
-<div class="card"><div class="card-header"><span class="card-titulo"><i class="fa-solid fa-clipboard-question" style="color:var(--azul-clr)"></i> Configurações da Avaliação</span></div>
-<div class="card-body"><div class="form-grid">
-<div class="c8 form-group"><label>Título da Avaliação</label>
-    <input type="text" name="av_titulo" value="<?= htmlspecialchars($avaliacao['titulo']??'Avaliação Final') ?>" placeholder="Ex: Avaliação de Aprendizagem"></div>
-<div class="c4 form-group"><label>Nota Mínima para Aprovação</label>
-    <div style="display:flex;align-items:center;gap:6px">
-        <input type="number" name="av_nota_minima" min="0" max="100" step="0.5" value="<?= htmlspecialchars($avaliacao['nota_minima']??($c['nota_minima']??'70')) ?>" style="flex:1">
-        <span style="font-size:.82rem;color:var(--c500)">pts</span>
-    </div></div>
-<div class="c6 form-group"><label>Instruções para o Aluno</label>
-    <textarea name="av_descricao" rows="2" placeholder="Instruções antes de iniciar..."><?= htmlspecialchars($avaliacao['descricao']??'') ?></textarea></div>
-<div class="c3 form-group"><label>Tentativas Máximas</label>
-    <input type="number" name="av_tentativas_max" min="1" max="99" value="<?= htmlspecialchars($avaliacao['tentativas_max']??($c['tentativas_maximas']??'3')) ?>"></div>
-<div class="c3 form-group"><label>Tempo Limite (min)</label>
-    <input type="number" name="av_tempo_limite" min="0" value="<?= htmlspecialchars($avaliacao['tempo_limite']??'') ?>" placeholder="Sem limite"></div>
-<div class="c12">
-    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:.875rem">
-        <input type="checkbox" name="av_randomizar" <?= ($avaliacao['randomizar']??0)?'checked':'' ?> style="accent-color:var(--azul-clr)">
-        Embaralhar ordem das questões para cada aluno
-    </label>
-</div>
-</div></div></div>
-
-<div class="card"><div class="card-header">
-    <span class="card-titulo"><i class="fa-solid fa-list-ol"></i> Questões de Múltipla Escolha
-        <span id="cont-questoes" style="font-size:.75rem;color:var(--c400);margin-left:6px;font-weight:400"><?= count($questoes)?:1 ?> questão(ões)</span>
-    </span>
-    <button type="button" onclick="adicionarQuestao()" class="btn btn-ghost btn-sm">
-        <i class="fa-solid fa-plus" style="color:var(--azul-clr)"></i> Nova Questão
+    <button class="tab-btn <?= $abaAtiva===2?'ativo':'' ?>" onclick="irAba(2)">
+        <i class="fa-solid fa-play-circle"></i> Conteúdo EAD
+        <?php if ($modulos): ?>
+        <span class="badge badge-azul"><?= count($modulos) ?></span>
+        <?php endif; ?>
     </button>
-</div><div class="card-body" style="padding:14px">
-    <div id="lista-questoes" style="display:flex;flex-direction:column;gap:14px">
-    <?php if (empty($questoes)): ?>
-    <div class="questao-bloco" data-qi="0" style="border:1.5px solid var(--c200);border-radius:var(--radius-lg);overflow:hidden">
-        <?= renderQuestaoHTML(0, ['enunciado'=>'','pontos'=>1,'alts'=>[['texto'=>'','correta'=>true],['texto'=>'','correta'=>false],['texto'=>'','correta'=>false],['texto'=>'','correta'=>false]],'correta'=>0]) ?>
-    </div>
+    <button class="tab-btn <?= $abaAtiva===3?'ativo':'' ?>" onclick="irAba(3)">
+        <i class="fa-solid fa-clipboard-check"></i> Avaliação
+    </button>
+    <button class="tab-btn <?= $abaAtiva===4?'ativo':'' ?>" onclick="irAba(4)">
+        <i class="fa-solid fa-certificate"></i> Certificado
+    </button>
     <?php else: ?>
-    <?php foreach ($questoes as $qi => $q): ?>
-    <div class="questao-bloco" data-qi="<?= $qi ?>" style="border:1.5px solid var(--c200);border-radius:var(--radius-lg);overflow:hidden">
-        <?= renderQuestaoHTML($qi, $q) ?>
-    </div>
-    <?php endforeach; ?>
+    <span class="tab-btn" style="opacity:.4;cursor:default">
+        <i class="fa-solid fa-lock"></i> Conteúdo EAD
+    </span>
+    <span class="tab-btn" style="opacity:.4;cursor:default">
+        <i class="fa-solid fa-lock"></i> Avaliação
+    </span>
+    <span class="tab-btn" style="opacity:.4;cursor:default">
+        <i class="fa-solid fa-lock"></i> Certificado
+    </span>
     <?php endif; ?>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════
+     ABA 1 — INFORMAÇÕES GERAIS
+     ══════════════════════════════════════════════════════════ -->
+<div class="tab-panel <?= $abaAtiva===1?'ativo':'' ?>" id="aba-1">
+<form method="POST" enctype="multipart/form-data">
+    <?= csrfField() ?>
+    <input type="hidden" name="_acao" value="salvar_curso">
+    <input type="hidden" name="proxima_aba" value="2">
+
+    <div style="display:grid;grid-template-columns:1fr 300px;gap:20px;align-items:start">
+
+        <!-- Coluna principal -->
+        <div style="display:flex;flex-direction:column;gap:16px">
+
+            <!-- Identificação básica -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title"><i class="fa-solid fa-pen-to-square"></i> Identificação</span>
+                </div>
+                <div class="card-body">
+                    <div class="form-group">
+                        <label class="form-label">Título <span class="req">*</span></label>
+                        <input type="text" name="titulo" class="form-control"
+                               value="<?= e($c['titulo'] ?? '') ?>"
+                               placeholder="Ex: Workshop de Cirurgia Ortopédica" required>
+                    </div>
+
+                    <div class="form-row form-row-3">
+                        <div class="form-group">
+                            <label class="form-label">Tipo <span class="req">*</span></label>
+                            <select name="tipo" class="form-control" required>
+                                <?php foreach (['CURSO','PALESTRA','WORKSHOP','CONGRESSO','WEBINAR'] as $t): ?>
+                                <option value="<?= $t ?>" <?= ($c['tipo']??'')===$t?'selected':'' ?>><?= $t ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Modalidade <span class="req">*</span></label>
+                            <select name="modalidade" id="selectModalidade" class="form-control" required>
+                                <option value="PRESENCIAL" <?= ($c['modalidade']??'')==='PRESENCIAL'?'selected':'' ?>>Presencial</option>
+                                <option value="EAD"        <?= ($c['modalidade']??'')==='EAD'       ?'selected':'' ?>>EAD (Online)</option>
+                                <option value="HIBRIDO"    <?= ($c['modalidade']??'')==='HIBRIDO'   ?'selected':'' ?>>Híbrido</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Status</label>
+                            <select name="status" class="form-control">
+                                <option value="RASCUNHO"  <?= ($c['status']??'')==='RASCUNHO' ?'selected':'' ?>>Rascunho</option>
+                                <option value="PUBLICADO" <?= ($c['status']??'')==='PUBLICADO'?'selected':'' ?>>Publicado</option>
+                                <option value="ENCERRADO" <?= ($c['status']??'')==='ENCERRADO'?'selected':'' ?>>Encerrado</option>
+                                <option value="CANCELADO" <?= ($c['status']??'')==='CANCELADO'?'selected':'' ?>>Cancelado</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-row form-row-2">
+                        <div class="form-group">
+                            <label class="form-label">Categoria</label>
+                            <select name="categoria_id" class="form-control">
+                                <option value="">Sem categoria</option>
+                                <?php foreach ($categorias as $cat): ?>
+                                <option value="<?= $cat['categoria_id'] ?>"
+                                        <?= ($c['categoria_id']??0)==$cat['categoria_id']?'selected':'' ?>>
+                                    <?= e($cat['nome']) ?>
+                                </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Instrutor Principal</label>
+                            <select name="instrutor_id" class="form-control">
+                                <option value="">Sem instrutor</option>
+                                <?php foreach ($instrutores as $inst): ?>
+                                <option value="<?= $inst['instrutor_id'] ?>"
+                                        <?= ($c['instrutor_id']??0)==$inst['instrutor_id']?'selected':'' ?>>
+                                    <?= e($inst['nome']) ?>
+                                    <?= $inst['titulo'] ? '— '.$inst['titulo'] : '' ?>
+                                </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Descrição</label>
+                        <textarea name="descricao" class="form-control" rows="4"
+                                  placeholder="Descreva o curso, objetivos e público-alvo..."><?= e($c['descricao'] ?? '') ?></textarea>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Datas e Local (dinâmico conforme modalidade) -->
+            <div class="card" id="secaoPresencial" style="<?= ($c['modalidade']??'PRESENCIAL')==='EAD' ? 'display:none' : '' ?>">
+                <div class="card-header">
+                    <span class="card-title"><i class="fa-solid fa-calendar-days"></i> Datas e Local</span>
+                </div>
+                <div class="card-body">
+                    <div class="form-row form-row-3">
+                        <div class="form-group">
+                            <label class="form-label">Data Início</label>
+                            <input type="date" name="data_inicio" class="form-control"
+                                   value="<?= e($c['data_inicio'] ?? '') ?>">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Data Fim</label>
+                            <input type="date" name="data_fim" class="form-control"
+                                   value="<?= e($c['data_fim'] ?? '') ?>">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Horário</label>
+                            <input type="text" name="horario" class="form-control"
+                                   value="<?= e($c['horario'] ?? '') ?>"
+                                   placeholder="Ex: 08h às 18h">
+                        </div>
+                    </div>
+                    <div class="form-row form-row-2">
+                        <div class="form-group">
+                            <label class="form-label">Nome do Local</label>
+                            <input type="text" name="local_nome" class="form-control"
+                                   value="<?= e($c['local_nome'] ?? '') ?>"
+                                   placeholder="Ex: Auditório do CRMV/TO">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Endereço</label>
+                            <input type="text" name="local_endereco" class="form-control"
+                                   value="<?= e($c['local_endereco'] ?? '') ?>">
+                        </div>
+                    </div>
+                    <div class="form-row form-row-3">
+                        <div class="form-group" style="grid-column:1/3">
+                            <label class="form-label">Cidade</label>
+                            <input type="text" name="local_cidade" class="form-control"
+                                   value="<?= e($c['local_cidade'] ?? '') ?>">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">UF</label>
+                            <input type="text" name="local_uf" class="form-control" maxlength="2"
+                                   value="<?= e($c['local_uf'] ?? 'TO') ?>">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Link EAD -->
+            <div class="card" id="secaoEAD" style="<?= ($c['modalidade']??'PRESENCIAL')!=='EAD' && ($c['modalidade']??'PRESENCIAL')!=='HIBRIDO' ? 'display:none' : '' ?>">
+                <div class="card-header">
+                    <span class="card-title"><i class="fa-solid fa-link"></i> Link EAD</span>
+                </div>
+                <div class="card-body">
+                    <div class="form-group">
+                        <label class="form-label">Link da plataforma EAD</label>
+                        <input type="url" name="link_ead" class="form-control"
+                               value="<?= e($c['link_ead'] ?? '') ?>"
+                               placeholder="https://plataforma.ead.com.br/curso/xxx">
+                        <span class="form-hint">URL para acesso ao curso em plataforma externa</span>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">ID do Vídeo YouTube (apresentação)</label>
+                        <input type="text" name="youtube_id" class="form-control"
+                               value="<?= e($c['youtube_id'] ?? '') ?>"
+                               placeholder="Cole a URL completa ou apenas o ID do vídeo">
+                        <span class="form-hint">Será exibido como vídeo de apresentação do curso</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Configurações de avaliação -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title"><i class="fa-solid fa-clipboard-check"></i> Avaliação e Aprovação</span>
+                </div>
+                <div class="card-body">
+                    <div style="display:flex;flex-direction:column;gap:12px">
+                        <label class="check-item">
+                            <input type="checkbox" name="requer_avaliacao" id="chkAvaliacao"
+                                   <?= !empty($c['requer_avaliacao']) ? 'checked' : '' ?>>
+                            <span class="check-label">
+                                Requer avaliação para conclusão
+                                <small>O aluno precisa responder uma prova ao final do curso</small>
+                            </span>
+                        </label>
+                        <div id="blocoNota" style="<?= empty($c['requer_avaliacao']) ? 'display:none' : '' ?>;padding-left:24px">
+                            <label class="check-item" style="margin-bottom:12px">
+                                <input type="checkbox" name="avaliacao_com_nota"
+                                       <?= !empty($c['avaliacao_com_nota']) ? 'checked' : '' ?>>
+                                <span class="check-label">
+                                    Avaliação com nota mínima de aprovação
+                                </span>
+                            </label>
+                            <div class="form-row form-row-2" style="max-width:300px">
+                                <div class="form-group">
+                                    <label class="form-label">Nota mínima (0–100)</label>
+                                    <input type="number" name="nota_minima" class="form-control"
+                                           min="0" max="100" step="0.5"
+                                           value="<?= e($c['nota_minima'] ?? 70) ?>">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Tentativas máximas</label>
+                                    <input type="number" name="tentativas_maximas" class="form-control"
+                                           min="1" max="99"
+                                           value="<?= e($c['tentativas_maximas'] ?? 3) ?>">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Observações internas -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title"><i class="fa-solid fa-note-sticky"></i> Observações Internas</span>
+                </div>
+                <div class="card-body">
+                    <textarea name="observacoes" class="form-control" rows="3"
+                              placeholder="Notas internas (não visíveis ao aluno)..."><?= e($c['observacoes'] ?? '') ?></textarea>
+                </div>
+            </div>
+        </div>
+
+        <!-- Coluna lateral -->
+        <div style="display:flex;flex-direction:column;gap:16px">
+
+            <!-- Carga e vagas -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title"><i class="fa-solid fa-sliders"></i> Configurações</span>
+                </div>
+                <div class="card-body">
+                    <div class="form-group">
+                        <label class="form-label">Carga Horária (h) <span class="req">*</span></label>
+                        <input type="number" name="carga_horaria" class="form-control"
+                               min="0.5" step="0.5" required
+                               value="<?= e($c['carga_horaria'] ?? '') ?>"
+                               placeholder="Ex: 8">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Vagas</label>
+                        <input type="number" name="vagas" class="form-control"
+                               min="0"
+                               value="<?= e($c['vagas'] ?? '') ?>"
+                               placeholder="Deixe vazio para ilimitado">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Valor (R$)</label>
+                        <input type="number" name="valor" class="form-control"
+                               min="0" step="0.01"
+                               value="<?= e($c['valor'] ?? '0') ?>"
+                               placeholder="0,00 para gratuito">
+                        <span class="form-hint">0 = gratuito</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Capa -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title"><i class="fa-solid fa-image"></i> Capa do Curso</span>
+                </div>
+                <div class="card-body">
+                    <?php if (!empty($c['capa'])): ?>
+                    <div style="margin-bottom:10px;border-radius:var(--radius);overflow:hidden;border:1px solid var(--border)">
+                        <img src="<?= BASE_URL ?>/uploads/capas/<?= e($c['capa']) ?>"
+                             alt="Capa" style="width:100%;height:130px;object-fit:cover">
+                    </div>
+                    <?php endif; ?>
+                    <input type="file" name="capa" class="form-control"
+                           accept=".jpg,.jpeg,.png,.webp">
+                    <span class="form-hint">JPG, PNG ou WEBP — máx. 5MB</span>
+                </div>
+            </div>
+        </div>
     </div>
-    <button type="button" onclick="adicionarQuestao()" class="btn btn-ghost" style="width:100%;justify-content:center;border-style:dashed;margin-top:12px">
-        <i class="fa-solid fa-plus" style="color:var(--azul-clr)"></i> Adicionar Questão
-    </button>
-</div></div>
-<div style="display:flex;gap:10px;align-items:center">
-    <button type="submit" class="btn btn-primario"><i class="fa-solid fa-floppy-disk"></i> Salvar Avaliação</button>
-    <span style="font-size:.78rem;color:var(--c400)"><i class="fa-solid fa-circle-info"></i> Aparece para o aluno após concluir todas as aulas.</span>
-</div>
+
+    <!-- Botões de ação -->
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+        <a href="<?= BASE_URL ?>/admin/cursos/lista.php" class="btn btn-ghost">Cancelar</a>
+        <button type="submit" name="proxima_aba" value="1" class="btn btn-ghost">
+            <i class="fa-solid fa-floppy-disk"></i> Salvar
+        </button>
+        <?php if (!$editando): ?>
+        <button type="submit" name="proxima_aba" value="2" class="btn btn-primario">
+            Salvar e continuar <i class="fa-solid fa-arrow-right"></i>
+        </button>
+        <?php else: ?>
+        <button type="submit" class="btn btn-primario">
+            <i class="fa-solid fa-floppy-disk"></i> Salvar Alterações
+        </button>
+        <?php endif; ?>
+    </div>
 </form>
-<?php endif; ?>
-</div><!-- /aba-avaliacao -->
-
-<!-- ══════════════ ABA CERTIFICADO ══════════════ -->
-<div id="aba-certificado" class="aba-conteudo" style="display:<?= $abaAtiva==='certificado'?'flex':'none' ?>;flex-direction:column;gap:20px">
-<form method="POST" id="fFormCert">
-<input type="hidden" name="_acao"      value="salvar_curso">
-<input type="hidden" name="_aba_ativa" value="certificado">
-<?= camposOcultosCurso($c) ?>
-
-<div class="alerta alerta-info">
-    <i class="fa-solid fa-robot" style="color:var(--azul-clr)"></i>
-    <div><strong>Emissão automática pelo aluno</strong><br>
-    <span style="font-size:.82rem">O certificado fica disponível quando o aluno concluir todas as aulas<?= ($c['requer_avaliacao']??0)?' e for aprovado na avaliação':'' ?>.</span></div>
 </div>
 
-<div class="card"><div class="card-header"><span class="card-titulo"><i class="fa-solid fa-sliders" style="color:var(--ouro)"></i> Configurações</span></div>
-<div class="card-body"><div class="form-grid">
-<div class="c4 form-group"><label>Validade</label>
-    <div style="display:flex;align-items:center;gap:8px">
-        <input type="number" name="cert_validade" min="0" max="120" value="<?= (int)($c['cert_validade']??0) ?>" placeholder="0" style="flex:1">
-        <span style="font-size:.85rem;color:var(--c500);white-space:nowrap">meses</span>
-    </div><span class="dica">Use 0 para certificado sem validade.</span></div>
-<div class="c8 form-group"><label>Observação Interna</label>
-    <input type="text" name="cert_obs" value="<?= htmlspecialchars($c['cert_obs']??'') ?>" placeholder="Não aparece no certificado"></div>
-</div></div></div>
+<!-- ══════════════════════════════════════════════════════════
+     ABA 2 — CONTEÚDO EAD (módulos, aulas, materiais)
+     ══════════════════════════════════════════════════════════ -->
+<?php if ($editando): ?>
+<div class="tab-panel <?= $abaAtiva===2?'ativo':'' ?>" id="aba-2">
+    <div style="display:grid;grid-template-columns:1fr 320px;gap:20px;align-items:start">
 
-<div class="card"><div class="card-header">
-    <span class="card-titulo"><i class="fa-solid fa-list-check" style="color:var(--verde)"></i> Conteúdo Programático — Verso</span>
-    <span class="badge b-azul" style="font-size:.7rem">Aparece no verso impresso</span>
-</div><div class="card-body" style="padding:0">
-    <div id="editor-toolbar" style="display:flex;flex-wrap:wrap;gap:4px;padding:10px 16px;background:var(--c50);border-bottom:1px solid var(--c200);position:sticky;top:0;z-index:10">
-        <div style="display:flex;gap:2px;border-right:1px solid var(--c200);padding-right:8px;margin-right:4px">
-            <button type="button" onclick="execCmd('bold')"      class="tbtn" title="Negrito"><i class="fa-solid fa-bold"></i></button>
-            <button type="button" onclick="execCmd('italic')"    class="tbtn" title="Itálico"><i class="fa-solid fa-italic"></i></button>
-            <button type="button" onclick="execCmd('underline')" class="tbtn" title="Sublinhado"><i class="fa-solid fa-underline"></i></button>
+        <!-- Módulos e aulas -->
+        <div>
+            <div class="flex-between mb-16">
+                <h2 class="section-title" style="margin:0">
+                    <i class="fa-solid fa-layer-group" style="color:var(--azul-600)"></i>
+                    Módulos e Aulas
+                </h2>
+                <button class="btn btn-primario btn-sm" onclick="abrirModalModulo()">
+                    <i class="fa-solid fa-plus"></i> Novo Módulo
+                </button>
+            </div>
+
+            <?php if ($modulos): ?>
+            <div class="accordion">
+                <?php foreach ($modulos as $mod): ?>
+                <div class="accordion-item <?= count($mod['aulas']) > 0 ? 'aberto' : '' ?>">
+                    <div class="accordion-header" onclick="toggleAccordion(this.parentElement)">
+                        <i class="fa-solid fa-folder" style="color:var(--ouro-400)"></i>
+                        <span style="flex:1"><?= e($mod['titulo']) ?></span>
+                        <span class="badge badge-cinza"><?= count($mod['aulas']) ?> aula(s)</span>
+                        <button type="button"
+                                onclick="event.stopPropagation();abrirModalAula(<?= $mod['modulo_id'] ?>, '<?= e(addslashes($mod['titulo'])) ?>')"
+                                class="btn btn-ghost btn-icon btn-sm" title="Adicionar aula">
+                            <i class="fa-solid fa-plus"></i>
+                        </button>
+                        <i class="fa-solid fa-chevron-down acc-toggle"></i>
+                    </div>
+                    <div class="accordion-body">
+                        <?php foreach ($mod['aulas'] as $aula): ?>
+                        <div class="aula-item">
+                            <div class="aula-item-icon <?= $aula['youtube_id'] ? 'aula-icon-video' : 'aula-icon-link' ?>">
+                                <i class="fa-solid fa-<?= $aula['youtube_id'] ? 'play' : 'link' ?>"></i>
+                            </div>
+                            <div class="aula-item-info">
+                                <div class="aula-item-titulo"><?= e($aula['titulo']) ?></div>
+                                <div class="aula-item-meta">
+                                    <?php if ($aula['duracao_min']): ?>
+                                    <i class="fa-solid fa-clock"></i> <?= $aula['duracao_min'] ?>min
+                                    <?php endif; ?>
+                                    <?php if ($aula['youtube_id']): ?>
+                                    · <i class="fa-brands fa-youtube"></i> YouTube
+                                    <?php elseif ($aula['link_externo']): ?>
+                                    · <i class="fa-solid fa-external-link"></i> Link externo
+                                    <?php endif; ?>
+                                </div>
+                            </div>
+                            <a href="<?= BASE_URL ?>/admin/cursos/del_aula.php?id=<?= $aula['aula_id'] ?>&curso_id=<?= $id ?>"
+                               class="btn btn-ghost btn-icon btn-sm"
+                               style="color:var(--verm-500)"
+                               onclick="return confirm('Remover aula?')" title="Remover">
+                                <i class="fa-solid fa-trash"></i>
+                            </a>
+                        </div>
+                        <?php endforeach; ?>
+                        <?php if (!$mod['aulas']): ?>
+                        <div style="padding:16px;text-align:center;color:var(--c400);font-size:.8rem">
+                            <i class="fa-solid fa-video-slash"></i> Nenhuma aula adicionada.
+                            <button class="btn btn-ghost btn-sm" style="margin-left:8px"
+                                    onclick="abrirModalAula(<?= $mod['modulo_id'] ?>, '<?= e(addslashes($mod['titulo'])) ?>')">
+                                + Adicionar aula
+                            </button>
+                        </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <?php endforeach; ?>
+            </div>
+            <?php else: ?>
+            <div class="card">
+                <div class="card-body">
+                    <div class="empty-state">
+                        <i class="fa-solid fa-layer-group"></i>
+                        <h3>Nenhum módulo cadastrado</h3>
+                        <p>Organize o conteúdo do curso em módulos.<br>Cada módulo pode ter várias aulas.</p>
+                        <button class="btn btn-primario btn-sm" style="margin-top:12px"
+                                onclick="abrirModalModulo()">
+                            <i class="fa-solid fa-plus"></i> Criar primeiro módulo
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <?php endif; ?>
         </div>
-        <div style="display:flex;gap:2px;border-right:1px solid var(--c200);padding-right:8px;margin-right:4px">
-            <button type="button" onclick="execCmd('insertUnorderedList')" class="tbtn"><i class="fa-solid fa-list-ul"></i></button>
-            <button type="button" onclick="execCmd('insertOrderedList')"   class="tbtn"><i class="fa-solid fa-list-ol"></i></button>
+
+        <!-- Materiais complementares -->
+        <div>
+            <h2 class="section-title">
+                <i class="fa-solid fa-paperclip" style="color:var(--azul-600)"></i>
+                Materiais Complementares
+            </h2>
+
+            <div class="card mb-16">
+                <div class="card-header">
+                    <span class="card-title">Enviar material</span>
+                </div>
+                <div class="card-body">
+                    <form method="POST" enctype="multipart/form-data">
+                        <?= csrfField() ?>
+                        <input type="hidden" name="_acao" value="upload_material">
+                        <div class="form-group">
+                            <label class="form-label">Título</label>
+                            <input type="text" name="material_titulo" class="form-control"
+                                   placeholder="Nome do material">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Arquivo</label>
+                            <input type="file" name="material" class="form-control"
+                                   accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.zip" required>
+                            <span class="form-hint">PDF, Word, PPT, Excel ou ZIP — máx. 20MB</span>
+                        </div>
+                        <button type="submit" class="btn btn-verde btn-sm btn-block">
+                            <i class="fa-solid fa-upload"></i> Enviar Material
+                        </button>
+                    </form>
+                </div>
+            </div>
+
+            <?php if ($materiais): ?>
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Materiais (<?= count($materiais) ?>)</span>
+                </div>
+                <?php foreach ($materiais as $mat): ?>
+                <div style="display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--c100)">
+                    <i class="fa-solid fa-file-pdf" style="color:var(--verm-500);font-size:.9rem"></i>
+                    <div style="flex:1;min-width:0">
+                        <div style="font-size:.82rem;font-weight:500;color:var(--c800);
+                                    white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+                            <?= e($mat['nome_original']) ?>
+                        </div>
+                        <div class="text-xs text-muted"><?= fmtTamanho($mat['tamanho']) ?></div>
+                    </div>
+                    <a href="<?= BASE_URL ?>/admin/cursos/del_material.php?id=<?= $mat['material_id'] ?>&curso_id=<?= $id ?>"
+                       class="btn btn-ghost btn-icon btn-sm" style="color:var(--verm-500)"
+                       onclick="return confirm('Remover?')" title="Remover">
+                        <i class="fa-solid fa-trash"></i>
+                    </a>
+                </div>
+                <?php endforeach; ?>
+            </div>
+            <?php endif; ?>
         </div>
-        <div style="margin-left:auto">
-            <button type="button" onclick="inserirModulo()" class="btn btn-ghost btn-sm" style="height:30px;font-size:.78rem">
-                <i class="fa-solid fa-puzzle-piece" style="color:var(--azul-clr)"></i> Inserir Módulo
+    </div>
+
+    <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border);display:flex;gap:10px;justify-content:flex-end">
+        <button onclick="irAba(1)" class="btn btn-ghost">
+            <i class="fa-solid fa-arrow-left"></i> Voltar
+        </button>
+        <button onclick="irAba(3)" class="btn btn-primario">
+            Ir para Avaliação <i class="fa-solid fa-arrow-right"></i>
+        </button>
+    </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════
+     ABA 3 — AVALIAÇÃO
+     ══════════════════════════════════════════════════════════ -->
+<div class="tab-panel <?= $abaAtiva===3?'ativo':'' ?>" id="aba-3">
+    <div class="card">
+        <div class="card-header">
+            <span class="card-title">
+                <i class="fa-solid fa-clipboard-check"></i> Configuração da Avaliação
+            </span>
+        </div>
+        <div class="card-body">
+            <?php if ($avaliacao): ?>
+            <!-- Avaliação existente: mostra questões -->
+            <div class="flex-between mb-16">
+                <div>
+                    <strong><?= e($avaliacao['titulo']) ?></strong>
+                    <span class="badge badge-verde" style="margin-left:8px"><?= $avaliacao['tipo'] ?></span>
+                    <div class="text-xs text-muted mt-4">
+                        Nota mínima: <?= $avaliacao['nota_minima'] ?> &nbsp;·&nbsp;
+                        Tentativas: <?= $avaliacao['tentativas_max'] ?>
+                    </div>
+                </div>
+                <a href="<?= BASE_URL ?>/admin/avaliacoes/form.php?id=<?= $avaliacao['avaliacao_id'] ?>&curso_id=<?= $id ?>"
+                   class="btn btn-ghost btn-sm">
+                    <i class="fa-solid fa-pen"></i> Editar avaliação
+                </a>
+            </div>
+
+            <div style="font-weight:600;font-size:.84rem;color:var(--c700);margin-bottom:10px">
+                <?= count($questoes) ?> questão(ões) cadastrada(s)
+            </div>
+            <?php foreach ($questoes as $i => $q): ?>
+            <div style="background:var(--c50);border:1px solid var(--border);
+                        border-radius:var(--radius-md);padding:14px 16px;margin-bottom:10px">
+                <div style="font-weight:500;font-size:.84rem;margin-bottom:8px">
+                    <?= ($i+1) ?>. <?= e($q['enunciado']) ?>
+                    <span class="text-xs text-muted">(<?= $q['pontos'] ?> pts)</span>
+                </div>
+                <?php foreach ($q['alts'] as $ai => $alt): ?>
+                <div style="padding:4px 8px;font-size:.8rem;border-radius:5px;
+                            background:<?= $alt['correta'] ? 'var(--verde-50)':'transparent' ?>;
+                            color:<?= $alt['correta'] ? 'var(--verde-600)':'var(--c600)' ?>">
+                    <?= chr(65+$ai) ?>. <?= e($alt['texto']) ?>
+                    <?php if ($alt['correta']): ?>
+                    <i class="fa-solid fa-check" style="margin-left:4px"></i>
+                    <?php endif; ?>
+                </div>
+                <?php endforeach; ?>
+            </div>
+            <?php endforeach; ?>
+
+            <?php else: ?>
+            <div class="empty-state">
+                <i class="fa-solid fa-clipboard"></i>
+                <h3>Nenhuma avaliação configurada</h3>
+                <p>Crie uma prova para que os alunos respondam ao final do curso.</p>
+                <a href="<?= BASE_URL ?>/admin/avaliacoes/form.php?curso_id=<?= $id ?>"
+                   class="btn btn-primario btn-sm" style="margin-top:12px">
+                    <i class="fa-solid fa-plus"></i> Criar Avaliação
+                </a>
+            </div>
+            <?php endif; ?>
+        </div>
+    </div>
+
+    <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border);display:flex;gap:10px;justify-content:flex-end">
+        <button onclick="irAba(2)" class="btn btn-ghost"><i class="fa-solid fa-arrow-left"></i> Voltar</button>
+        <button onclick="irAba(4)" class="btn btn-primario">Ir para Certificado <i class="fa-solid fa-arrow-right"></i></button>
+    </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════
+     ABA 4 — CERTIFICADO
+     ══════════════════════════════════════════════════════════ -->
+<div class="tab-panel <?= $abaAtiva===4?'ativo':'' ?>" id="aba-4">
+<form method="POST">
+    <?= csrfField() ?>
+    <input type="hidden" name="_acao" value="salvar_curso">
+
+    <div class="card">
+        <div class="card-header">
+            <span class="card-title"><i class="fa-solid fa-certificate"></i> Configurações do Certificado</span>
+        </div>
+        <div class="card-body">
+            <div class="form-row form-row-2">
+                <div class="form-group">
+                    <label class="form-label">Validade do Certificado (anos)</label>
+                    <input type="number" name="cert_validade" class="form-control"
+                           min="1" max="99"
+                           value="<?= e($c['cert_validade'] ?? '') ?>"
+                           placeholder="Ex: 5">
+                    <span class="form-hint">Deixe em branco para sem validade</span>
+                </div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Conteúdo Programático (verso do certificado)</label>
+                <textarea name="cert_conteudo_programatico" class="form-control" rows="6"
+                          placeholder="Liste os tópicos abordados no curso..."><?= e($c['cert_conteudo_programatico'] ?? '') ?></textarea>
+                <span class="form-hint">Aceita HTML básico para formatação</span>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Observações do Certificado (uso interno)</label>
+                <textarea name="cert_obs" class="form-control" rows="3"
+                          placeholder="Notas internas sobre emissão..."><?= e($c['cert_obs'] ?? '') ?></textarea>
+            </div>
+
+            <!-- Campos ocultos para não perder os dados da aba 1 -->
+            <input type="hidden" name="titulo"        value="<?= e($c['titulo'] ?? '') ?>">
+            <input type="hidden" name="tipo"          value="<?= e($c['tipo'] ?? 'CURSO') ?>">
+            <input type="hidden" name="modalidade"    value="<?= e($c['modalidade'] ?? 'PRESENCIAL') ?>">
+            <input type="hidden" name="carga_horaria" value="<?= e($c['carga_horaria'] ?? 0) ?>">
+            <input type="hidden" name="status"        value="<?= e($c['status'] ?? 'RASCUNHO') ?>">
+        </div>
+    </div>
+
+    <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border);display:flex;gap:10px;justify-content:space-between">
+        <button onclick="irAba(3)" type="button" class="btn btn-ghost">
+            <i class="fa-solid fa-arrow-left"></i> Voltar
+        </button>
+        <div style="display:flex;gap:8px">
+            <a href="<?= BASE_URL ?>/admin/certificados/emitir.php?curso_id=<?= $id ?>"
+               class="btn btn-ouro btn-sm">
+                <i class="fa-solid fa-certificate"></i> Ir para Emissão
+            </a>
+            <button type="submit" class="btn btn-verde">
+                <i class="fa-solid fa-floppy-disk"></i> Salvar Configurações
             </button>
         </div>
     </div>
-    <div id="editor-cert" contenteditable="true" spellcheck="true"
-         style="min-height:260px;padding:20px 24px;font-size:.9rem;font-family:'Segoe UI',sans-serif;line-height:1.85;color:#1a1a1a;outline:none">
-        <?= $c['cert_conteudo_programatico'] ?? '' ?>
-    </div>
-    <input type="hidden" name="cert_conteudo_programatico" id="cert_prog_input">
-    <div style="padding:8px 16px;background:var(--c50);font-size:.72rem;color:var(--c400)">
-        <span id="cert-char-count">0 caracteres</span>
-    </div>
-</div></div>
-
-<button type="submit" class="btn btn-primario" style="align-self:flex-start">
-    <i class="fa-solid fa-floppy-disk"></i> Salvar Configurações do Certificado
-</button>
 </form>
-</div><!-- /aba-certificado -->
-
-</div><!-- /col-principal -->
-
-<!-- ══ COLUNA LATERAL ══ -->
-<div style="display:flex;flex-direction:column;gap:20px">
-
-<!-- Status -->
-<div class="card"><div class="card-header"><span class="card-titulo"><i class="fa-solid fa-toggle-on"></i> Status</span></div>
-<div class="card-body" style="display:flex;flex-direction:column;gap:10px">
-<?php foreach (['RASCUNHO'=>['b-cinza','Rascunho','Visível apenas para admins'],'PUBLICADO'=>['b-verde','Publicado','Visível para inscrições'],'ENCERRADO'=>['b-verm','Encerrado','Inscrições fechadas']] as $v=>[$cls,$lbl,$desc]): ?>
-<label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:10px;border-radius:7px;border:2px solid <?= ($c['status']??'RASCUNHO')===$v?'var(--azul-clr)':'var(--c200)' ?>" id="statusCard_<?= $v ?>">
-    <input type="radio" name="_status_lateral" value="<?= $v ?>" <?= ($c['status']??'RASCUNHO')===$v?'checked':'' ?>
-        onchange="sincronizarStatus(this.value);highlightStatus()" style="margin-top:2px;accent-color:var(--azul-clr)">
-    <div><span class="badge <?= $cls ?>"><?= $lbl ?></span><div style="font-size:.72rem;color:var(--c400);margin-top:3px"><?= $desc ?></div></div>
-</label>
-<?php endforeach; ?>
-</div></div>
-
-<!-- Capa -->
-<div class="card"><div class="card-header"><span class="card-titulo"><i class="fa-solid fa-image"></i> Capa</span></div>
-<div class="card-body">
-    <div id="prevCapa" style="<?= empty($c['capa'])?'display:none':'' ?>;margin-bottom:12px;border-radius:8px;overflow:hidden;border:1px solid var(--c200)">
-        <img id="imgCapa" src="<?= !empty($c['capa'])?'/crmv/uploads/capas/'.htmlspecialchars($c['capa']):'' ?>" style="width:100%;max-height:160px;object-fit:cover">
-    </div>
-    <div style="border:2px dashed var(--c300);border-radius:8px;padding:16px;text-align:center;cursor:pointer" onclick="document.getElementById('inpCapaDados').click()">
-        <i class="fa-solid fa-image" style="font-size:1.4rem;color:var(--c300);margin-bottom:6px"></i>
-        <p style="font-size:.8rem;color:var(--c500);margin:0">JPG, PNG ou WEBP — máx. 5MB</p>
-    </div>
-    <div id="nomeCapaSelec" style="font-size:.78rem;color:var(--verde);margin-top:6px;text-align:center"></div>
-    <?php if (!empty($c['capa']) && $editando): ?>
-    <div style="margin-top:8px;text-align:center">
-        <a href="/crmv/admin/cursos/del_capa.php?id=<?= $id ?>" class="btn btn-ghost btn-sm" data-confirma="Remover a capa?">
-            <i class="fa-solid fa-trash" style="color:var(--verm)"></i> Remover
-        </a>
-    </div>
-    <?php endif; ?>
-</div></div>
-
-<!-- Resumo -->
-<?php if ($editando):
-$tA = 0; foreach ($modulos as $m_) $tA += count($m_['aulas']);
-$tM = count($materiais); $tQ = count($questoes);
-?>
-<div class="card"><div class="card-header"><span class="card-titulo"><i class="fa-solid fa-circle-info"></i> Resumo</span></div>
-<div class="card-body" style="font-size:.8rem;display:flex;flex-direction:column;gap:2px">
-<?php foreach ([['fa-play-circle','Aulas',$tA],['fa-paperclip','Materiais',$tM],['fa-clipboard-question','Questões',$tQ]] as [$ic,$lbl,$n]): ?>
-<div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--c100)">
-    <span style="color:var(--c500)"><i class="fa-solid <?= $ic ?>"></i> <?= $lbl ?></span>
-    <strong><?= $n ?></strong>
 </div>
-<?php endforeach; ?>
-<div style="display:flex;justify-content:space-between;padding:7px 0">
-    <span style="color:var(--c500)"><i class="fa-solid fa-certificate"></i> Certificado auto</span>
-    <strong style="color:var(--verde)"><i class="fa-solid fa-check"></i> Ativo</strong>
-</div>
-</div></div>
 <?php endif; ?>
 
-</div><!-- /col-lateral -->
-</div><!-- /grid -->
+<!-- ── Modais inline ───────────────────────────────────────── -->
 
-<style>
-.tbtn{padding:5px 9px;background:#fff;border:1px solid var(--c300);border-radius:5px;cursor:pointer;color:var(--c600);font-size:.78rem;height:30px;display:inline-flex;align-items:center;transition:all .15s}
-.tbtn:hover{background:var(--azul-esc);color:#fff;border-color:var(--azul-esc)}
-.tipo-btn{transition:background .15s,color .15s}
-.tipo-ativo{background:var(--azul-esc)!important;color:#fff!important}
-#editor-cert h2{font-size:1rem;font-weight:700;color:#0d2137;margin:14px 0 6px;border-bottom:1px solid #e8d89a;padding-bottom:4px}
-#editor-cert h3{font-size:.9rem;font-weight:700;color:#0d2137;margin:10px 0 4px}
-#editor-cert ul,#editor-cert ol{margin-left:20px}
-#editor-cert li{margin-bottom:3px}
-</style>
+<!-- Modal: Novo Módulo -->
+<div class="modal-overlay" id="modalModulo">
+    <div class="modal" style="max-width:440px">
+        <div class="modal-header">
+            <span class="modal-title"><i class="fa-solid fa-folder-plus"></i> Novo Módulo</span>
+            <button class="modal-close" onclick="document.getElementById('modalModulo').classList.remove('aberto')">
+                <i class="fa-solid fa-xmark"></i>
+            </button>
+        </div>
+        <form method="POST">
+            <?= csrfField() ?>
+            <input type="hidden" name="_acao" value="salvar_modulo">
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Título do Módulo <span class="req">*</span></label>
+                    <input type="text" name="modulo_titulo" class="form-control" required
+                           placeholder="Ex: Módulo 1 — Introdução">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Ordem</label>
+                    <input type="number" name="modulo_ordem" class="form-control"
+                           min="1" value="<?= count($modulos) + 1 ?>">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-ghost"
+                        onclick="document.getElementById('modalModulo').classList.remove('aberto')">
+                    Cancelar
+                </button>
+                <button type="submit" class="btn btn-primario">
+                    <i class="fa-solid fa-check"></i> Salvar Módulo
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Modal: Nova Aula -->
+<div class="modal-overlay" id="modalAula">
+    <div class="modal">
+        <div class="modal-header">
+            <span class="modal-title"><i class="fa-solid fa-play-circle"></i> Nova Aula em <span id="moduloNomeModal"></span></span>
+            <button class="modal-close" onclick="document.getElementById('modalAula').classList.remove('aberto')">
+                <i class="fa-solid fa-xmark"></i>
+            </button>
+        </div>
+        <form method="POST">
+            <?= csrfField() ?>
+            <input type="hidden" name="_acao" value="salvar_aula">
+            <input type="hidden" name="modulo_id" id="modalAulaModuloId">
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Título da Aula <span class="req">*</span></label>
+                    <input type="text" name="aula_titulo" class="form-control" required
+                           placeholder="Ex: Introdução à Anestesiologia">
+                </div>
+                <div class="form-row form-row-2">
+                    <div class="form-group">
+                        <label class="form-label">Duração (minutos)</label>
+                        <input type="number" name="aula_duracao" class="form-control" min="1" placeholder="Ex: 45">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Ordem</label>
+                        <input type="number" name="aula_ordem" class="form-control" min="1" value="1">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Link YouTube (URL completa ou ID)</label>
+                    <input type="text" name="aula_youtube" class="form-control"
+                           placeholder="https://youtube.com/watch?v=...">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Link Externo (alternativo ao YouTube)</label>
+                    <input type="url" name="aula_link" class="form-control"
+                           placeholder="https://...">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-ghost"
+                        onclick="document.getElementById('modalAula').classList.remove('aberto')">
+                    Cancelar
+                </button>
+                <button type="submit" class="btn btn-primario">
+                    <i class="fa-solid fa-check"></i> Adicionar Aula
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
 
 <script>
-/* ── Abas ── */
-function trocarAba(q){
-    document.querySelectorAll('.aba-conteudo').forEach(function(e){e.style.display='none'});
-    document.querySelectorAll('.tab-btn').forEach(function(e){e.classList.remove('ativo')});
-    var a=document.getElementById('aba-'+q); if(a) a.style.display='flex';
-    var t=document.getElementById('tab-'+q); if(t) t.classList.add('ativo');
-    document.querySelectorAll('[name="_aba_ativa"]').forEach(function(e){e.value=q});
-    document.querySelectorAll('[data-guard]').forEach(function(f){f.dataset.guardClean='1'});
-}
-
-/* ── Status lateral ── */
-function sincronizarStatus(v){
-    var s=document.getElementById('inp_status_dados'); if(s) s.value=v;
-    document.querySelectorAll('[name="status"]').forEach(function(e){e.value=v});
-}
-function highlightStatus(){
-    document.querySelectorAll('[id^="statusCard_"]').forEach(function(el){el.style.borderColor='var(--c200)'});
-    var sel=document.querySelector('[name="_status_lateral"]:checked');
-    if(sel){var card=document.getElementById('statusCard_'+sel.value);if(card) card.style.borderColor='var(--azul-clr)';}
-}
-
-/* ── Capa ── */
-function prevCapaFn(inp){
-    if(!inp.files||!inp.files[0]) return;
-    var r=new FileReader();
-    r.onload=function(e){
-        var img=document.getElementById('imgCapa'); var prev=document.getElementById('prevCapa');
-        if(img) img.src=e.target.result; if(prev) prev.style.display='';
-        var nm=document.getElementById('nomeCapaSelec'); if(nm) nm.textContent='✓ '+inp.files[0].name;
-    };
-    r.readAsDataURL(inp.files[0]);
-}
-
-/* ── Toggle local ── */
-function toggleLocal(v){
-    var s=document.getElementById('secaoLocal'); if(s) s.style.display=(v==='EAD')?'none':'';
-}
-
-/* ── Listar arquivos materiais ── */
-function listarArquivos(inp){
-    var div=document.getElementById('listaArqs'); if(!div||!inp.files) return;
-    if(!inp.files.length){div.style.display='none';return;}
-    var html='<div style="margin-top:8px;display:flex;flex-direction:column;gap:4px">';
-    for(var i=0;i<inp.files.length;i++){
-        html+='<div style="display:flex;align-items:center;gap:8px;padding:5px 10px;background:var(--c50);border-radius:5px;border:1px solid var(--c200)">';
-        html+='<i class="fa-solid fa-file" style="color:var(--azul-clr)"></i>';
-        html+='<span style="flex:1;font-size:.82rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+inp.files[i].name+'</span>';
-        html+='<span style="font-size:.7rem;color:var(--c400)">'+Math.round(inp.files[i].size/1024)+' KB</span>';
-        html+='</div>';
-    }
-    html+='</div>';
-    div.innerHTML=html; div.style.display='';
-}
-
-/* ── Aulas ── */
-var _aulaIdx = document.querySelectorAll('.aula-bloco').length;
-function adicionarAula(){
-    var idx=_aulaIdx++;
-    var tpl='<div class="aula-bloco" data-idx="'+idx+'" style="border:1.5px solid var(--c200);border-radius:var(--radius-lg);overflow:hidden">'
-        +'<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--azul-esc);color:#fff">'
-        +'<span class="aula-num" style="width:22px;height:22px;border-radius:50%;background:var(--ouro);color:var(--azul-esc);font-weight:800;font-size:.75rem;display:flex;align-items:center;justify-content:center;flex-shrink:0">'+(idx+1)+'</span>'
-        +'<input type="text" name="aula_titulo[]" placeholder="Título da aula" style="flex:1;background:transparent;border:none;border-bottom:1px solid rgba(255,255,255,.3);color:#fff;font-weight:600;font-size:.9rem;outline:none;padding:2px 0">'
-        +'<input type="number" name="aula_duracao[]" min="1" max="600" placeholder="min" style="width:62px;background:transparent;border:1px solid rgba(255,255,255,.3);border-radius:5px;color:#fff;font-size:.78rem;padding:3px 6px;text-align:center">'
-        +'<button type="button" onclick="removerAula(this)" style="background:transparent;border:none;color:rgba(255,255,255,.6);cursor:pointer;font-size:.9rem;padding:4px;border-radius:4px"><i class="fa-solid fa-xmark"></i></button>'
-        +'</div>'
-        +'<div style="display:flex;border-bottom:1px solid var(--c200)">'
-        +'<button type="button" class="tipo-btn tipo-ativo" onclick="mudarTipoAula(this,\'yt\')" style="flex:1;padding:8px;border:none;cursor:pointer;font-size:.78rem;background:var(--azul-esc);color:#fff;border-right:1px solid var(--c200)"><i class="fa-brands fa-youtube" style="color:#ff6b6b"></i> YouTube</button>'
-        +'<button type="button" class="tipo-btn" onclick="mudarTipoAula(this,\'link\')" style="flex:1;padding:8px;border:none;cursor:pointer;font-size:.78rem;background:var(--c50);color:var(--c600);border-right:1px solid var(--c200)"><i class="fa-solid fa-link"></i> Link Externo</button>'
-        +'<button type="button" class="tipo-btn" onclick="mudarTipoAula(this,\'upload\')" style="flex:1;padding:8px;border:none;cursor:pointer;font-size:.78rem;background:var(--c50);color:var(--c600)"><i class="fa-solid fa-cloud-arrow-up"></i> Upload Local</button>'
-        +'</div>'
-        +'<div class="tipo-painel tipo-yt" style="display:block;padding:12px 14px"><input type="text" name="aula_yt[]" placeholder="URL ou ID do YouTube" style="width:100%;padding:8px 10px;border:1px solid var(--c300);border-radius:6px;font-size:.85rem" oninput="prevAulaYT(this)"><div class="yt-prev-wrap" style="display:none;margin-top:8px"></div></div>'
-        +'<div class="tipo-painel tipo-link" style="display:none;padding:12px 14px"><input type="url" name="aula_link[]" placeholder="https://..." style="width:100%;padding:8px 10px;border:1px solid var(--c300);border-radius:6px;font-size:.85rem"></div>'
-        +'<div class="tipo-painel tipo-upload" style="display:none;padding:12px 14px"><div style="border:2px dashed var(--c300);border-radius:6px;padding:14px;text-align:center;cursor:pointer" onclick="this.querySelector(\'input\').click()"><i class="fa-solid fa-cloud-arrow-up" style="font-size:1.4rem;color:var(--c400);margin-bottom:6px"></i><p style="font-size:.8rem;color:var(--c500);margin:0">Clique para selecionar vídeo</p><input type="file" name="aula_video[]" accept=".mp4,.mov,.avi,.mkv,.webm" style="display:none" onchange="nomeVideoSelecionado(this)"></div><div class="nome-video" style="font-size:.78rem;color:var(--verde);margin-top:4px"></div></div>'
-        +'</div>';
-    var lista=document.getElementById('lista-aulas'); if(lista){lista.insertAdjacentHTML('beforeend',tpl);renumerarAulas();}
-}
-function removerAula(btn){var b=btn.closest('.aula-bloco');if(b)b.remove();renumerarAulas();}
-function renumerarAulas(){document.querySelectorAll('#lista-aulas .aula-bloco').forEach(function(b,i){var n=b.querySelector('.aula-num');if(n)n.textContent=i+1;});}
-function mudarTipoAula(btn,tipo){
-    var bloco=btn.closest('.aula-bloco'); if(!bloco) return;
-    bloco.querySelectorAll('.tipo-btn').forEach(function(b){b.classList.remove('tipo-ativo');b.style.background='var(--c50)';b.style.color='var(--c600)';});
-    btn.classList.add('tipo-ativo'); btn.style.background='var(--azul-esc)'; btn.style.color='#fff';
-    bloco.querySelectorAll('.tipo-painel').forEach(function(p){p.style.display='none';});
-    var panel=bloco.querySelector('.tipo-'+tipo); if(panel) panel.style.display='block';
-}
-function prevAulaYT(inp){
-    var raw=inp.value.trim(); if(!raw) return;
-    var m=raw.match(/(?:v=|\/embed\/|\/shorts\/|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
-    var ytId=m?m[1]:(raw.length<=11?raw:''); if(!ytId) return;
-    var wrap=inp.closest('.tipo-yt').querySelector('.yt-prev-wrap');
-    if(wrap){wrap.innerHTML='<iframe width="100%" height="180" src="https://www.youtube.com/embed/'+ytId+'" frameborder="0" allowfullscreen style="border-radius:6px;max-width:320px"></iframe>';wrap.style.display='';}
-}
-function nomeVideoSelecionado(inp){var div=inp.closest('.tipo-upload').querySelector('.nome-video');if(div&&inp.files&&inp.files[0])div.textContent='✓ '+inp.files[0].name;}
-
-/* ── Questões ── */
-var _qi=document.querySelectorAll('.questao-bloco').length;
-function adicionarQuestao(){
-    var qi=_qi++; var letras=['A','B','C','D'];
-    var h='<div class="questao-bloco" data-qi="'+qi+'" style="border:1.5px solid var(--c200);border-radius:var(--radius-lg);overflow:hidden">';
-    h+='<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--azul-esc);color:#fff">';
-    h+='<span class="q-num" style="width:22px;height:22px;border-radius:50%;background:var(--ouro);color:var(--azul-esc);font-weight:800;font-size:.75rem;display:flex;align-items:center;justify-content:center;flex-shrink:0">'+(qi+1)+'</span>';
-    h+='<span style="font-size:.75rem;color:rgba(255,255,255,.7)">Questão '+(qi+1)+'</span>';
-    h+='<div style="display:flex;align-items:center;gap:6px;margin-left:auto"><span style="font-size:.72rem;opacity:.7">Pontos:</span><input type="number" name="q_pontos[]" min="0.5" max="100" step="0.5" value="1" style="width:55px;background:transparent;border:1px solid rgba(255,255,255,.4);border-radius:4px;color:#fff;font-size:.78rem;padding:2px 6px;text-align:center"><button type="button" onclick="removerQuestao(this)" style="background:transparent;border:none;color:rgba(255,255,255,.6);cursor:pointer;padding:4px;border-radius:4px"><i class="fa-solid fa-xmark"></i></button></div></div>';
-    h+='<div style="padding:12px 14px;background:var(--c50);border-bottom:1px solid var(--c200)"><textarea name="q_enunciado[]" rows="2" placeholder="Enunciado da questão..." required style="width:100%;padding:8px;border:1px solid var(--c300);border-radius:6px;font-size:.88rem;resize:vertical"></textarea></div>';
-    h+='<div style="padding:12px 14px;display:flex;flex-direction:column;gap:6px"><div style="font-size:.72rem;color:var(--c400);margin-bottom:2px"><i class="fa-solid fa-circle-check" style="color:var(--verde)"></i> Marque a alternativa correta</div>';
-    for(var a=0;a<4;a++){
-        h+='<label style="display:flex;align-items:center;gap:8px;flex:1;padding:7px 10px;border-radius:6px;cursor:pointer;border:1.5px solid var(--c200);background:#fff">';
-        h+='<input type="radio" name="q_correta['+qi+']" value="'+a+'" '+(a===0?'checked':'')+' onchange="destacarCorreta(this)" style="accent-color:var(--verde)">';
-        h+='<span style="width:18px;height:18px;border-radius:50%;background:var(--azul-esc);color:var(--ouro);font-weight:700;font-size:.7rem;display:flex;align-items:center;justify-content:center;flex-shrink:0">'+letras[a]+'</span>';
-        h+='<input type="text" name="q_alt'+a+'[]" placeholder="Alternativa '+letras[a]+'" style="flex:1;border:none;outline:none;background:transparent;font-size:.85rem;color:var(--c700)">';
-        h+='</label>';
-    }
-    h+='</div></div>';
-    var lista=document.getElementById('lista-questoes'); if(lista){lista.insertAdjacentHTML('beforeend',h);atualizarContQuestoes();}
-}
-function removerQuestao(btn){var b=btn.closest('.questao-bloco');if(b)b.remove();atualizarContQuestoes();}
-function atualizarContQuestoes(){var n=document.querySelectorAll('.questao-bloco').length;var el=document.getElementById('cont-questoes');if(el)el.textContent=n+' questão(ões)';}
-function destacarCorreta(radio){
-    var bloco=radio.closest('.questao-bloco'); if(!bloco) return;
-    bloco.querySelectorAll('label').forEach(function(l){l.style.borderColor='var(--c200)';l.style.background='#fff';});
-    var lbl=radio.closest('label'); if(lbl){lbl.style.borderColor='var(--verde)';lbl.style.background='#f0fdf4';}
-}
-
-/* ── Editor certificado ── */
-var _editorCert=document.getElementById('editor-cert');
-var _certInput =document.getElementById('cert_prog_input');
-function execCmd(cmd,val){document.execCommand(cmd,false,val||null);if(_editorCert&&_certInput)_certInput.value=_editorCert.innerHTML;atualizarContChars();}
-function inserirModulo(){var n=prompt('Nome do módulo/tópico:');if(!n)return;document.execCommand('formatBlock',false,'h2');document.execCommand('insertText',false,n);if(_editorCert&&_certInput)_certInput.value=_editorCert.innerHTML;}
-function atualizarContChars(){if(!_editorCert)return;var n=(_editorCert.innerText||'').length;var el=document.getElementById('cert-char-count');if(el)el.textContent=n+' caracteres';}
-if(_editorCert){
-    _editorCert.addEventListener('input',function(){atualizarContChars();if(_certInput)_certInput.value=_editorCert.innerHTML;});
-    atualizarContChars();
-}
-var fCert=document.getElementById('fFormCert');
-if(fCert) fCert.addEventListener('submit',function(){if(_editorCert&&_certInput)_certInput.value=_editorCert.innerHTML;});
-
-/* ── Sync status ao submeter qualquer form ── */
-document.querySelectorAll('form').forEach(function(f){
-    f.addEventListener('submit',function(){
-        var sel=document.querySelector('[name="_status_lateral"]:checked');
-        if(sel) f.querySelectorAll('[name="status"]').forEach(function(e){e.value=sel.value;});
-        var sid=document.getElementById('inp_status_dados');
-        if(sid&&sel) sid.value=sel.value;
+// ── Navegação de abas ─────────────────────────────────────
+function irAba(n) {
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('ativo'));
+    document.querySelectorAll('.tab-btn').forEach((b,i) => {
+        b.classList.toggle('ativo', i === n - 1);
     });
+    const panel = document.getElementById('aba-' + n);
+    if (panel) panel.classList.add('ativo');
+    window.scrollTo({top: 0, behavior: 'smooth'});
+}
+
+// ── Modalidade dinâmica ───────────────────────────────────
+document.getElementById('selectModalidade')?.addEventListener('change', function() {
+    const isEAD       = this.value === 'EAD';
+    const isHibrido   = this.value === 'HIBRIDO';
+    const isPresencial = this.value === 'PRESENCIAL';
+
+    document.getElementById('secaoPresencial').style.display = isPresencial || isHibrido ? '' : 'none';
+    document.getElementById('secaoEAD').style.display        = isEAD || isHibrido ? '' : 'none';
 });
 
-/* Inicialização */
-highlightStatus();
+// ── Toggle avaliação ──────────────────────────────────────
+document.getElementById('chkAvaliacao')?.addEventListener('change', function() {
+    document.getElementById('blocoNota').style.display = this.checked ? '' : 'none';
+});
+
+// ── Modais ────────────────────────────────────────────────
+function abrirModalModulo() {
+    document.getElementById('modalModulo').classList.add('aberto');
+}
+function abrirModalAula(moduloId, moduloNome) {
+    document.getElementById('modalAulaModuloId').value = moduloId;
+    document.getElementById('moduloNomeModal').textContent = moduloNome;
+    document.getElementById('modalAula').classList.add('aberto');
+}
+
+// ── Accordion ─────────────────────────────────────────────
+function toggleAccordion(item) {
+    item.classList.toggle('aberto');
+}
+
+// ── Fechar modal ao clicar fora ───────────────────────────
+document.querySelectorAll('.modal-overlay').forEach(overlay => {
+    overlay.addEventListener('click', function(e) {
+        if (e.target === this) this.classList.remove('aberto');
+    });
+});
 </script>
 
-<?php require_once __DIR__ . '/../../includes/layout_footer.php'; ?>
+<?php require_once __DIR__ . '/../../includes/layout_admin_footer.php'; ?>

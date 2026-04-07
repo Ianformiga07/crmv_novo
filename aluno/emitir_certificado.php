@@ -5,6 +5,7 @@
  *
  * Admin NÃO acessa esta rota — é redirecionado para /crmv/admin/certificados/emitir.php
  */
+require_once __DIR__ . '/../includes/config.php';
 require_once __DIR__ . '/../includes/conexao.php';
 exigeLogin();
 

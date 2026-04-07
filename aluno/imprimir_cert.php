@@ -6,6 +6,7 @@
  * NÃO usa exigeAdmin(). Usa exigeLogin() e valida que o certificado
  * pertence ao usuário logado.
  */
+require_once __DIR__ . '/../includes/config.php';
 require_once __DIR__ . '/../includes/conexao.php';
 exigeLogin();
 

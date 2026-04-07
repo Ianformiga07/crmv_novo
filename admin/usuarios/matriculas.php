@@ -8,6 +8,7 @@
  *  - Alterar status de uma matrícula existente
  *  - Cancelar / excluir matrícula
  */
+require_once __DIR__ . '/../../includes/config.php';
 require_once __DIR__ . '/../../includes/conexao.php';
 exigeAdmin();
 

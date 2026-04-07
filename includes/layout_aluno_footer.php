@@ -1,27 +1,23 @@
-    </main><!-- /pagina -->
-</div><!-- /main-wrapper -->
-
-<!-- Overlay mobile -->
-<div id="sidebar-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999" onclick="fecharSidebar()"></div>
+    </div><!-- .aluno-container -->
+</main><!-- .aluno-main -->
 
 <script>
-// Toggle sidebar mobile
-var sidebar = document.getElementById('sidebar');
-var overlay = document.getElementById('sidebar-overlay');
-document.getElementById('sidebar-toggle').addEventListener('click', function(){
-    sidebar.classList.toggle('aberta');
-    overlay.style.display = sidebar.classList.contains('aberta') ? 'block' : 'none';
+// ── Menu mobile aluno ─────────────────────────────────────
+document.getElementById('alunoMenuBtn')?.addEventListener('click', () => {
+    document.getElementById('alunoNav').classList.toggle('aberta');
 });
-function fecharSidebar(){
-    sidebar.classList.remove('aberta');
-    overlay.style.display = 'none';
-}
-// Confirmar ações
-document.querySelectorAll('[data-confirma]').forEach(function(el){
-    el.addEventListener('click', function(e){
-        if(!confirm(this.dataset.confirma)) e.preventDefault();
+
+// ── Auto-dismiss flash ────────────────────────────────────
+setTimeout(() => {
+    document.querySelectorAll('.flash').forEach(el => {
+        el.style.transition = 'opacity .4s';
+        el.style.opacity    = '0';
+        setTimeout(() => el.remove(), 400);
     });
-});
+}, 5000);
 </script>
+<?php if (!empty($extraJs)): ?>
+<script><?= $extraJs ?></script>
+<?php endif; ?>
 </body>
 </html>

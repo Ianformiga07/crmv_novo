@@ -1,4 +1,5 @@
 <?php
+require_once __DIR__ . '/../includes/config.php';
 require_once __DIR__ . '/../includes/conexao.php';
 exigeLogin();
 if ((int)($_SESSION['usr_perfil'] ?? 0) === 1) {
